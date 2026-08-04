@@ -21,6 +21,8 @@ from typing import Any
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
+from flight_assistant.factcache import SUBJECT_HELP, TTL_DAYS, normalize_subject
+
 _NO_DATA = "no_data: v0 未接入该数据源，请把相关风险标为 needs_user_input 或 unknown，不要猜测。"
 
 
@@ -108,16 +110,60 @@ _ALL_TOOLS = {
 DATA_SOURCES: set[str] = set()
 
 
-def build_server():
-    """只注册真正有数据的工具。全都没有时返回 None，不注册空转的工具。"""
+def build_remember_fact(cache):
+    """写回事实的工具。
+
+    刻意只做「写」不做「读」：命中的事实由代码按机场码预取后直接注入
+    prompt，省掉一次工具往返——往返比多塞几百 token 贵得多。agent 只需要
+    在学到新东西时写回。
+    """
+
+    @tool(
+        "remember_fact",
+        "把查证到的静态事实存入缓存，供后续查询复用。只存跨用户跨时间都不变的"
+        "客观事实（官方 MCT、航站楼设施、末班车时刻、入境流程耗时、过境签政策），"
+        "不要存针对某个具体行程的判断。"
+        "subject 用机场码/国家码开头的结构化键，如 SFO:mct_intl_to_domestic",
+        {"topic": str, "subject": str, "value": str, "source": str},
+    )
+    async def remember_fact(args: dict[str, Any]) -> dict[str, Any]:
+        topic = args["topic"]
+        if topic not in TTL_DAYS:
+            return _text(
+                f"拒绝：topic 必须是 {', '.join(sorted(TTL_DAYS))} 之一，收到 {topic!r}"
+            )
+        if not args.get("source", "").strip():
+            return _text("拒绝：source 不能为空。没有来源的说法不该进缓存。")
+        if normalize_subject(args["subject"]) is None:
+            return _text(f"拒绝：subject={args['subject']!r} 格式不合规。{SUBJECT_HELP}")
+        f = cache.put(topic, args["subject"], args["value"], args["source"])
+        return _text(
+            f"已缓存 [{f.topic}] {f.subject}（有效期 {TTL_DAYS[topic]} 天）。"
+            "后续查询会直接注入，不用再查。"
+        )
+
+    return remember_fact
+
+
+def build_server(cache=None):
+    """只注册真正有数据的工具。全都没有时返回 None，不注册空转的工具。
+
+    cache 不为 None 时额外注册 remember_fact——即使 DATA_SOURCES 为空，
+    写回缓存这件事本身是有意义的。
+    """
     live = [_ALL_TOOLS[name] for name in sorted(DATA_SOURCES) if name in _ALL_TOOLS]
+    if cache is not None:
+        live.append(build_remember_fact(cache))
     if not live:
         return None
     return create_sdk_mcp_server(name="risk_tools", version="0.1.0", tools=live)
 
 
-def allowed_tools() -> list[str]:
-    return [f"mcp__risk_tools__{name}" for name in sorted(DATA_SOURCES)]
+def allowed_tools(cache=None) -> list[str]:
+    names = sorted(DATA_SOURCES)
+    if cache is not None:
+        names = names + ["remember_fact"]
+    return [f"mcp__risk_tools__{name}" for name in names]
 
 
 def missing_sources() -> list[str]:

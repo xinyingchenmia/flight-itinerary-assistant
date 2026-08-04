@@ -32,6 +32,7 @@ from flight_assistant.budget import (  # noqa: E402
 from flight_assistant.budget import check as budget_check  # noqa: E402
 from flight_assistant.budget import cost_of  # noqa: E402
 from flight_assistant.clarification.agent import clarify  # noqa: E402
+from flight_assistant.factcache import FactCache  # noqa: E402
 from flight_assistant.filtering import TripRequest, filter_and_sort  # noqa: E402
 from flight_assistant.matching import group_and_compare  # noqa: E402
 from flight_assistant.models import (  # noqa: E402
@@ -127,15 +128,20 @@ def load_fetched(path: Path) -> list[tuple[Itinerary, PlatformOffer]]:
     ]
 
 
-async def _review(subject, args, stats, ledger, trip_context=None):
+async def _review(subject, args, stats, ledger, trip_context=None, cache=None):
+    """跑风险审查：先用一批探成本，对照预算，再审剩下的。
+
+    每审完一批就把缓存落盘。实测中止时丢掉过已经付费学到的事实——
+    事实是花钱换来的，不该跟着一次失败的运行一起消失。
+    """
     soft = args.soft_pref
-    """跑风险审查：先用一批探成本，对照预算，再审剩下的。"""
     probe_n = min(args.batch_size, len(subject))
     risks = await review_batch(
         subject[:probe_n],
         stats,
         trip_context=trip_context,
         soft_preferences=soft,
+        cache=cache,
         model=args.review_model or args.model,
         ledger=ledger,
         web_search=args.web_search,
@@ -148,11 +154,16 @@ async def _review(subject, args, stats, ledger, trip_context=None):
         total_candidates=len(subject),
         batch_size=args.batch_size,
     )
+    if cache is not None:
+        cache.save()  # 探测批次学到的事实先落盘
+
     print(f"成本探测: {est.render()}  (预算 ${args.budget:.2f})")
-    budget_check(est, args.budget)
 
     rest = subject[probe_n:]
+    # 只在还有候选要审时才拿推算值卡预算。探测批次已经覆盖全部候选时，
+    # 后面不会再花钱，此时中止等于白扔掉刚付过的那笔——实测这样亏掉过 $0.56。
     if rest:
+        budget_check(est, args.budget)
         try:
             risks.update(
                 await review_all(
@@ -160,6 +171,7 @@ async def _review(subject, args, stats, ledger, trip_context=None):
                     stats,
                     trip_context=trip_context,
                     soft_preferences=soft,
+                    cache=cache,
                     batch_size=args.batch_size,
                     model=args.review_model or args.model,
                     ledger=ledger,
@@ -170,6 +182,9 @@ async def _review(subject, args, stats, ledger, trip_context=None):
             )
         except BudgetExceeded as e:
             print(f"\n预算用尽，只审查了前 {probe_n} 个候选: {e}", file=sys.stderr)
+        finally:
+            if cache is not None:
+                cache.save()
     return risks
 
 
@@ -228,6 +243,12 @@ async def main() -> int:
         default="price",
         choices=["price", "duration", "stops", "layover"],
         help="layover = 按中转等待时长排序（用户确认「中转越短越好」时用）",
+    )
+    ap.add_argument(
+        "--fact-cache",
+        default=str(Path.home() / ".flight-assistant-facts.json"),
+        help="事实缓存文件。agent 查到的静态事实（官方 MCT、航站楼设施、"
+        "末班车时刻）存这里，后续查询直接注入不重复查。设为空字符串可禁用",
     )
     ap.add_argument(
         "--soft-pref",
@@ -291,6 +312,10 @@ async def main() -> int:
         if args.trip_context
         else None
     )
+
+    cache = FactCache(Path(args.fact_cache)) if args.fact_cache else None
+    if cache is not None:
+        print(f"事实缓存: {args.fact_cache} — {cache.stats()}")
 
     fetched = load_fetched(path)
     req = TripRequest(
@@ -363,7 +388,9 @@ async def main() -> int:
         print(f"从缓存读取风险审查结果: {cache_path}（未花费）")
         elapsed = 0.0
     else:
-        risks_by_key = await _review(subject, args, stats, ledger, injected_ctx)
+        risks_by_key = await _review(
+            subject, args, stats, ledger, injected_ctx, cache
+        )
         elapsed = time.monotonic() - t0
         if cache_path:
             cache_path.write_text(
@@ -477,7 +504,9 @@ async def main() -> int:
     if trip_ctx != TripContext():
         print(f"\n{'=' * 72}\n步骤 8：带 TripContext 重新审查\n{'=' * 72}")
         try:
-            risks_by_key = await _review(after, args, stats, ledger, trip_ctx)
+            risks_by_key = await _review(
+                after, args, stats, ledger, trip_ctx, cache
+            )
         except BudgetExceeded as e:
             print(f"预算不足，跳过重审: {e}", file=sys.stderr)
         else:
@@ -497,6 +526,10 @@ async def main() -> int:
         f"剩余未知项 {len(unresolved)} 条（澄清前 {before_unresolved} 条，"
         f"解决了 {before_unresolved - len(unresolved)} 条）"
     )
+
+    if cache is not None:
+        cache.save()
+        print(f"\n事实缓存已更新: {cache.stats()}")
 
     print(f"\n{'=' * 72}")
     print(ledger.render())

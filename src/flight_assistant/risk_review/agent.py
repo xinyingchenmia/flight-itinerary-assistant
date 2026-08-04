@@ -106,6 +106,23 @@ SYSTEM_PROMPT = """你审查机票行程的风险，输出结构化的 Risk 列�
 preference_note 的 verdict 只影响排序权重，不参与过滤——主观偏好不该把
 候选直接删掉。查不到的写 verdict="unknown"，不要凭印象说某个机场好玩。
 
+## 已经缓存的事实（known_facts）
+
+输入里的 known_facts 是之前查证过、已存档的静态事实（官方 MCT、航站楼设施、
+末班车时刻等）。**直接采信，不要重复查**——重复查同一个事实是这个系统最大
+的成本浪费。标了"已过期"的可以重查，其余不要动。
+
+反过来，你**新查到的静态事实要调 remember_fact 存起来**，供后续查询复用。
+判断标准：这条事实跨用户、跨行程、跨月份都成立吗？
+  存：SFO 官方国际转国内 MCT 是多少、DFW Terminal D 有哪些餐饮、
+      CTA 蓝线是否 24 小时运营、中国护照过境香港是否免签
+  不存：这个候选的 95 分钟够不够（那是针对具体行程的判断，不是事实）
+
+**subject 必须用机场码/国家码开头的结构化键**，如 SFO:mct_intl_to_domestic、
+DFW:terminal_d_facility、ORD:ground_transit、HK:transit_visa_cn。用中文短语
+命名会导致同一事实存成多条、后续也匹配不上——实测这样让缓存完全失效。
+同一个事实已经在 known_facts 里出现过，就不要再存一遍。
+
 ## 硬约束
 
 - 每条 evidence 必须引用具体数字或具体规则。"衔接 95 分钟，而 ORD 是本
@@ -287,6 +304,7 @@ def build_context(
     candidate: FlightPriceComparison,
     trip_context: TripContext | None = None,
     soft_preferences: list[str] | None = None,
+    cache=None,
 ) -> dict[str, Any]:
     """把代码能确定算出的事实预先算好，避免 agent 去推断。
 
@@ -309,6 +327,14 @@ def build_context(
         "trip_context": (trip_context or TripContext()).model_dump(mode="json"),
         # 用户原话里映射不到结构化字段的偏好。代码不解释它们的含义。
         "soft_preferences": soft_preferences or [],
+        # 已缓存的事实，按本行程涉及的机场/国家预取后直接注入。
+        # 注入而不是让 agent 调工具查——省掉一次工具往返，往返比多塞
+        # 几百 token 贵得多。
+        "known_facts": (
+            [f.render() for f in cache.relevant(cache.subjects_of_itinerary(it))]
+            if cache is not None
+            else []
+        ),
     }
 
 
@@ -365,6 +391,7 @@ def build_options(
     model: str | None = None,
     web_search: bool = False,
     max_searches: int = 6,
+    cache=None,
 ) -> ClaudeAgentOptions:
     """组装 agent 配置。
 
@@ -383,10 +410,10 @@ def build_options(
             "schema": schema or _RISK_SCHEMA,
         },
     }
-    server = risk_tools.build_server()
+    server = risk_tools.build_server(cache)
     if server is not None:
         kwargs["mcp_servers"] = {"risk_tools": server}
-        allowed += risk_tools.allowed_tools()
+        allowed += risk_tools.allowed_tools(cache)
     if web_search:
         allowed += ["WebSearch", "WebFetch"]
     if allowed:
@@ -486,6 +513,7 @@ async def review_batch(
     max_searches: int = 6,
     reserve: float = 0.0,
     soft_preferences: list[str] | None = None,
+    cache=None,
 ) -> dict[str, Findings]:
     """一次调用审查一批候选。
 
@@ -503,7 +531,7 @@ async def review_batch(
         )
 
     payload = [
-        {"candidate_id": i, **build_context(c, trip_context, soft_preferences)}
+        {"candidate_id": i, **build_context(c, trip_context, soft_preferences, cache)}
         for i, c in enumerate(candidates)
     ]
     prompt = (
@@ -522,7 +550,9 @@ async def review_batch(
     api_error: str | None = None
     async for message in query(
         prompt=prompt,
-        options=build_options(_BATCH_SCHEMA, model, web_search, max_searches),
+        options=build_options(
+            _BATCH_SCHEMA, model, web_search, max_searches, cache
+        ),
     ):
         result = getattr(message, "result", None)
         if result is not None:
@@ -576,6 +606,7 @@ async def review_all(
     max_searches: int = 6,
     reserve: float = 0.0,
     soft_preferences: list[str] | None = None,
+    cache=None,
 ) -> dict[str, Findings]:
     """审查多个候选：分批 + 批间并发。
 
@@ -623,6 +654,7 @@ async def review_all(
                 max_searches,
                 reserve,
                 soft_preferences,
+                cache,
             )
 
     merged: dict[str, Findings] = {}

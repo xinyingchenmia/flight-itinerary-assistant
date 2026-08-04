@@ -112,6 +112,32 @@ def test_segment_times_parsed(parsed):
     assert leg.arr_local > leg.dep_local
 
 
+def test_country_codes_come_from_platform_data(parsed):
+    """国别码取自携程数据，不是靠机场码推断。
+
+    有了它，"这个中转点是进入哪个国家的第一个落点"就是代码能算的事实，
+    不用让 agent 凭记忆猜 FRA 属于哪个国家。
+    """
+    it = next(i for i, _ in parsed if any(s.flight_no == "LH733" for s in i.segments))
+    assert it.segments[0].dep_country == "CN"
+    assert it.segments[0].arr_country == "DE"
+    assert it.segments[1].arr_country == "US"
+
+
+def test_connections_flag_first_arrival_in_country(parsed):
+    """FRA 是进入德国的首个落点；代码只陈述这个事实，不判断德国转机
+    要不要入境（那是 agent 的事）。
+    """
+    from flight_assistant.risk_review.agent import build_connections
+
+    it = next(i for i, _ in parsed if any(s.flight_no == "LH733" for s in i.segments))
+    conn = build_connections(it)[0]
+    assert conn["at_airport"] == "FRA"
+    assert conn["country"] == "DE"
+    assert conn["first_arrival_in_country"] is True
+    assert conn["gap_min"] == 80  # 07:30 落地 → 08:50 起飞
+
+
 def test_fare_conditions_kept_raw(parsed):
     """退改政策原文按文档要求原样保留，不解析。"""
     assert all(o.fare_conditions_raw for _, o in parsed)

@@ -1,14 +1,20 @@
 """风险审查 agent 的工具。
 
 v0 阶段本地没有接入真实参考数据源（MCT 表、签证规则库、城市末班车
-时刻），这三个工具一律返回"无数据"，让 agent 把对应项标成
+时刻），这些工具一律返回"无数据"，让 agent 把对应项标成
 needs_user_input / unknown，而不是拿训练数据里的旧知识当结论——签证
 和时刻类信息变化快，编造一个数字比返回"未知"更危险。
 
-v1 的工作就是把每个函数体换成真实数据源查询，工具签名不用改。
+**成本要点**：既然工具必然返回 no_data，就不该把它们注册进去让 agent
+去试。实测注册了工具的情况下平均 6.5 轮往返，其中 5 轮多是在依次调用
+四个工具、依次拿到 no_data——纯浪费。DATA_SOURCES 为空时 build_server()
+返回 None，agent 侧改为在 system prompt 里直接声明"本次没有外部数据源"。
 
-注意：联程保护判断（len(tickets) > 1）刻意没有做成工具——那是纯代码
-能算的确定事实，由 build_context() 算好当上下文字段传给 agent。
+v1 接入真实数据源时：把对应函数体换成真实查询，并把工具名加进
+DATA_SOURCES，其余代码不用动。
+
+注意：联程保护判断（len(tickets) > 1）和衔接时长刻意没有做成工具——
+那些是纯代码能算的确定事实，由 build_context() 算好当上下文传给 agent。
 """
 
 from typing import Any
@@ -90,22 +96,30 @@ async def lookup_entry_procedure(args: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+_ALL_TOOLS = {
+    "lookup_mct": lookup_mct,
+    "lookup_transit_visa": lookup_transit_visa,
+    "lookup_last_ground_transit": lookup_last_ground_transit,
+    "lookup_entry_procedure": lookup_entry_procedure,
+}
+
+# 已经接上真实数据源的工具名。v0 为空——四个函数体都还是 no_data 桩。
+# v1 每接一个数据源就把名字加进来，agent 侧会自动开始调用它。
+DATA_SOURCES: set[str] = set()
+
+
 def build_server():
-    return create_sdk_mcp_server(
-        name="risk_tools",
-        version="0.1.0",
-        tools=[
-            lookup_mct,
-            lookup_transit_visa,
-            lookup_last_ground_transit,
-            lookup_entry_procedure,
-        ],
-    )
+    """只注册真正有数据的工具。全都没有时返回 None，不注册空转的工具。"""
+    live = [_ALL_TOOLS[name] for name in sorted(DATA_SOURCES) if name in _ALL_TOOLS]
+    if not live:
+        return None
+    return create_sdk_mcp_server(name="risk_tools", version="0.1.0", tools=live)
 
 
-ALLOWED_TOOLS = [
-    "mcp__risk_tools__lookup_mct",
-    "mcp__risk_tools__lookup_transit_visa",
-    "mcp__risk_tools__lookup_last_ground_transit",
-    "mcp__risk_tools__lookup_entry_procedure",
-]
+def allowed_tools() -> list[str]:
+    return [f"mcp__risk_tools__{name}" for name in sorted(DATA_SOURCES)]
+
+
+def missing_sources() -> list[str]:
+    """没有数据源的能力清单，用来在 prompt 里明确告知 agent。"""
+    return sorted(set(_ALL_TOOLS) - DATA_SOURCES)

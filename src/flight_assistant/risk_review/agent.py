@@ -22,12 +22,21 @@ SYSTEM_PROMPT = """你审查机票行程的风险，输出结构化的 Risk 列�
 把这些复述一遍毫无价值。你的价值在于那些订票页面不会告诉他、但会真正
 毁掉行程的事：
 
-1. **需要入境/清关的中转，时间够不够**
-   美国是最典型的：在美国的第一个入境口岸必须入境、提取托运行李、
-   过海关、重新托运、再过一次安检——即使后续航段是国内段、即使是同
-   一张票。这个流程通常要 90-180 分钟，远超普通国际转机的 MCT。
-   这条规则本身是稳定的，你可以直接引用；但具体机场的排队时长和官方
-   MCT 数值要查工具。加拿大、申根区内外转换也有类似情况。
+1. **需要入境/清关/重新托运的中转，时间够不够**
+   有些国家不设国际中转区，转机旅客必须正式入境、提取托运行李、过海关、
+   重新托运、再过一次安检——即使后续航段是国内段、即使是同一张票。这类
+   流程通常要 90-180 分钟，远超普通国际转机的 MCT。
+
+   输入里的 connections 已经给出每个中转点的国别、是否是进入该国的首个
+   落点、衔接分钟数。**由你判断该国的转机规则**——代码不维护"哪些国家
+   需要入境"的表，那种表穷举不完。判断时区分三种情况：
+   - 你确知该国要求入境（如美国、加拿大是长期稳定的制度）→ 直接说明并
+     引用这条规则
+   - 你确知该国有国际中转区、可全程空侧中转 → 不报这条风险
+   - 你不确定该国规则，或规则近年有变动（很多国家在调整）→ 标
+     needs_user_input=true，写明"需确认 XX 国转机是否须入境"，不要猜
+
+   具体机场的排队时长和官方 MCT 数值一律不要凭记忆给数字。
    → kind = entry_connection_tight
 
 2. **深夜/凌晨落地后到不了目的地**
@@ -52,6 +61,8 @@ SYSTEM_PROMPT = """你审查机票行程的风险，输出结构化的 Risk 列�
 - 每条 evidence 必须引用具体数字或具体规则。"衔接 95 分钟，而 ORD 是本
   行程在美国的首个入境口岸，需入境+提取行李+重新托运+二次安检" 是合格的；
   "转机时间可能偏紧" 不合格。
+- **evidence 控制在 150 字以内**，只写：具体数字 + 为什么这是问题 + 缺哪项
+  信息。不要写应对建议、不要重复输入里已有的字段值、不要解释常识。
 - 不要报订票平台上已经明示的信息（行李额度、退改条款原文、价格构成）。
   只有当它和其他条件组合出平台没提示的后果时才报。
 - 只报真正影响决策的风险，不要为了显得全面而堆砌小概率事件。宁可 2 条
@@ -68,8 +79,11 @@ SYSTEM_PROMPT = """你审查机票行程的风险，输出结构化的 Risk 列�
 
 - ticket_count / has_through_protection：联程保护情况
 - baggage_through_checked：null 表示未知，必须 flag
-- connections：各中转点的衔接分钟数、是否换航站楼、是否跨国
+- connections：各中转点的衔接分钟数、国别、是否是进入该国的首个落点、
+  是否换航站楼、是否跨承运人
 - trip_context：用户侧信息，null 表示未知
+
+这些是事实。你的工作是判断这些事实意味着什么，不是重新算一遍。
 """
 
 _RISK_SCHEMA = {
@@ -130,13 +144,24 @@ def build_connections(it) -> list[dict[str, Any]]:
     在这些事实之上做判断（够不够、要不要入境），不是重新算一遍减法。
     """
     out = []
+    origin_country = it.segments[0].dep_country
     for i in range(len(it.segments) - 1):
         arr, dep = it.segments[i], it.segments[i + 1]
+        country = arr.arr_country
+        prior = {s.arr_country for s in it.segments[:i]}
         out.append(
             {
                 "at_airport": arr.arr_airport,
                 "after_segment": i,
                 "gap_min": int((dep.dep_local - arr.arr_local).total_seconds() // 60),
+                "country": country,
+                # 是否是进入该国的第一个落点。是事实，不含"该国是否要求
+                # 入境"的判断——那由 agent 根据国别自己判断。
+                "first_arrival_in_country": (
+                    None
+                    if country is None
+                    else country != origin_country and country not in prior
+                ),
                 "arr_terminal": arr.arr_terminal,
                 "dep_terminal": dep.dep_terminal,
                 "terminal_change": (
@@ -175,13 +200,48 @@ def build_context(
     }
 
 
-def build_options() -> ClaudeAgentOptions:
-    return ClaudeAgentOptions(
-        system_prompt=SYSTEM_PROMPT,
-        mcp_servers={"risk_tools": risk_tools.build_server()},
-        allowed_tools=risk_tools.ALLOWED_TOOLS,
-        output_format={"type": "json_schema", "schema": _RISK_SCHEMA},
-    )
+_NO_SOURCES_NOTE = """
+
+## 本次运行没有外部数据源
+
+以下能力当前没有可查的数据源：{missing}。
+
+不要尝试调用工具（没有注册任何工具）。凡是需要这些数据才能下结论的，
+直接标 needs_user_input=true，并在 evidence 里写明缺的是哪一项。
+你依然可以引用制度性的稳定规则（如美国首个入境口岸必须提取行李重新
+托运），只是不要编造具体的官方 MCT 数值、末班车时刻或签证条款。
+"""
+
+
+def _system_prompt() -> str:
+    missing = risk_tools.missing_sources()
+    if not missing:
+        return SYSTEM_PROMPT
+    return SYSTEM_PROMPT + _NO_SOURCES_NOTE.format(missing="、".join(missing))
+
+
+def build_options(
+    schema: dict | None = None, model: str | None = None
+) -> ClaudeAgentOptions:
+    """组装 agent 配置。
+
+    工具只在真正有数据源时才注册——注册一堆必然返回 no_data 的工具会让
+    agent 白跑 5 轮往返（实测平均 6.5 轮，是主要成本来源）。
+    """
+    kwargs: dict[str, Any] = {
+        "system_prompt": _system_prompt(),
+        "output_format": {
+            "type": "json_schema",
+            "schema": schema or _RISK_SCHEMA,
+        },
+    }
+    server = risk_tools.build_server()
+    if server is not None:
+        kwargs["mcp_servers"] = {"risk_tools": server}
+        kwargs["allowed_tools"] = risk_tools.allowed_tools()
+    if model:
+        kwargs["model"] = model
+    return ClaudeAgentOptions(**kwargs)
 
 
 async def review_candidate(
@@ -225,23 +285,125 @@ async def review_candidate(
     return [Risk.model_validate(r) for r in payload["risks"]]
 
 
+# 批量审查的输出 schema：按候选序号回填，避免在输出里重复长长的
+# itinerary_key（那是纯粹的输出 token 浪费）。
+_BATCH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "candidate_id": {"type": "integer"},
+                    "risks": _RISK_SCHEMA["properties"]["risks"],
+                },
+                "required": ["candidate_id", "risks"],
+            },
+        }
+    },
+    "required": ["results"],
+}
+
+
+async def review_batch(
+    candidates: list[FlightPriceComparison],
+    stats: list[dict] | None = None,
+    trip_context: TripContext | None = None,
+    model: str | None = None,
+) -> dict[str, list[Risk]]:
+    """一次调用审查一批候选。
+
+    为什么批量：system prompt 有 1500+ 字，逐个候选调用就要付 N 遍。
+    实测单候选单调用 $0.30，其中相当一部分是重复的 system prompt 和规则
+    说明。一批 8 个候选共享一次 prompt，同时模型还能横向对比（"这四条都
+    在 DFW 中转，只有第一条衔接不足"），输出更简洁。
+    """
+    if not candidates:
+        return {}
+
+    payload = [
+        {"candidate_id": i, **build_context(c, trip_context)}
+        for i, c in enumerate(candidates)
+    ]
+    prompt = (
+        f"审查以下 {len(candidates)} 个候选行程。对每个候选按 schema 输出一条 "
+        "results 元素，candidate_id 用输入里给的序号。\n"
+        "多个候选常有相同的结构性问题——相同的问题不必逐条重复长篇解释，"
+        "但每个候选该报的风险都要报全。\n\n"
+        + json.dumps(payload, ensure_ascii=False, indent=1)
+    )
+
+    raw: str | None = None
+    meta: dict = {"batch_size": len(candidates)}
+    async for message in query(
+        prompt=prompt, options=build_options(_BATCH_SCHEMA, model)
+    ):
+        result = getattr(message, "result", None)
+        if result is not None:
+            if getattr(message, "is_error", False) or (
+                getattr(message, "subtype", "success") != "success"
+            ):
+                raise RuntimeError(f"风险审查失败（API 层错误）: {result}")
+            raw = result
+            for attr in ("total_cost_usd", "duration_ms", "num_turns"):
+                value = getattr(message, attr, None)
+                if value is not None:
+                    meta[attr] = value
+
+    if stats is not None:
+        stats.append(meta)
+    if raw is None:
+        raise RuntimeError("批量风险审查未返回结果")
+
+    parsed = json.loads(raw) if isinstance(raw, str) else raw
+    out: dict[str, list[Risk]] = {c.itinerary_key: [] for c in candidates}
+    for row in parsed["results"]:
+        idx = row["candidate_id"]
+        if not 0 <= idx < len(candidates):
+            continue  # 序号越界就丢弃，不猜它指的是哪个候选
+        out[candidates[idx].itinerary_key] = [
+            Risk.model_validate(r) for r in row["risks"]
+        ]
+    return out
+
+
 async def review_all(
     candidates: list[FlightPriceComparison],
     stats: list[dict] | None = None,
-    concurrency: int = 6,
+    concurrency: int = 3,
     trip_context: TripContext | None = None,
+    batch_size: int = 8,
+    model: str | None = None,
 ) -> dict[str, list[Risk]]:
-    """并发审查多个候选。
+    """审查多个候选：分批 + 批间并发。
 
-    每个候选是独立的一次 agent 循环（互不依赖），串行跑纯属浪费——实测
-    6 个候选串行 382 秒，其中大部分时间在等工具往返。concurrency 限制
-    同时在跑的数量，避免一次性打出几十个并发请求。
+    两层优化都是实测数据驱动的：
+      - 串行 6 个候选 382 秒 → 并发后 137 秒
+      - 逐个调用 $0.30/候选，主要浪费在重复付 system prompt
     """
+    if batch_size <= 1:
+        sem = asyncio.Semaphore(concurrency)
+
+        async def one(c: FlightPriceComparison) -> tuple[str, list[Risk]]:
+            async with sem:
+                return c.itinerary_key, await review_candidate(
+                    c, stats, trip_context
+                )
+
+        return dict(await asyncio.gather(*(one(c) for c in candidates)))
+
+    batches = [
+        candidates[i : i + batch_size]
+        for i in range(0, len(candidates), batch_size)
+    ]
     sem = asyncio.Semaphore(concurrency)
 
-    async def one(c: FlightPriceComparison) -> tuple[str, list[Risk]]:
+    async def run_batch(batch: list[FlightPriceComparison]) -> dict[str, list[Risk]]:
         async with sem:
-            return c.itinerary_key, await review_candidate(c, stats, trip_context)
+            return await review_batch(batch, stats, trip_context, model)
 
-    pairs = await asyncio.gather(*(one(c) for c in candidates))
-    return dict(pairs)
+    merged: dict[str, list[Risk]] = {}
+    for part in await asyncio.gather(*(run_batch(b) for b in batches)):
+        merged.update(part)
+    return merged

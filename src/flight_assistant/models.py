@@ -14,6 +14,12 @@ class Segment(BaseModel):
     arr_terminal: str | None
     dep_local: datetime
     arr_local: datetime
+    # 国别码来自平台数据（携程 batchSearch 里就有），不是靠机场码推断的。
+    # 有了它，"这个中转点是进入哪个国家的第一个落点"就是代码能算的事实，
+    # 不用让 agent 凭记忆猜机场属于哪国。至于"该国转机要不要入境提取行李"，
+    # 那是 agent 的判断，代码不做这个表。
+    dep_country: str | None = None
+    arr_country: str | None = None
 
 
 class TicketGroup(BaseModel):

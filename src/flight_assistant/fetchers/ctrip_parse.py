@@ -64,6 +64,8 @@ def parse_segment(flight: dict) -> Segment:
         arr_terminal=_blank_to_none(flight.get("arrivalTerminal")),
         dep_local=_parse_dt(flight["departureDateTime"]),
         arr_local=_parse_dt(flight["arrivalDateTime"]),
+        dep_country=flight.get("departureCountryCode"),
+        arr_country=flight.get("arrivalCountryCode"),
     )
 
 

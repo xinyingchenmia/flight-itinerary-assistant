@@ -23,12 +23,20 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from flight_assistant.budget import (  # noqa: E402
+    BudgetExceeded,
+    CostEstimate,
+    candidates_covered,
+)
+from flight_assistant.budget import check as budget_check  # noqa: E402
+from flight_assistant.budget import cost_of  # noqa: E402
 from flight_assistant.clarification.agent import clarify  # noqa: E402
 from flight_assistant.filtering import TripRequest, filter_and_sort  # noqa: E402
 from flight_assistant.matching import group_and_compare  # noqa: E402
 from flight_assistant.models import Itinerary, PlatformOffer  # noqa: E402
 from flight_assistant.recompute import apply_updates  # noqa: E402
-from flight_assistant.risk_review.agent import review_all  # noqa: E402
+from flight_assistant.risk_review.agent import review_all, review_batch  # noqa: E402
+from flight_assistant.screening import screen_all  # noqa: E402
 
 # 预设旅客画像。刻意留了空白（托运件数不确定），用来看澄清对话 agent
 # 会不会把「不确定」当成结论、还是老实标成未知。
@@ -89,6 +97,14 @@ async def main() -> int:
     ap.add_argument("--sort", default="price", choices=["price", "duration", "stops"])
     ap.add_argument("--max-stops", type=int, default=None)
     ap.add_argument("--interactive", action="store_true")
+    ap.add_argument(
+        "--batch-size", type=int, default=8, help="一次调用审查几个候选（越大越省）"
+    )
+    ap.add_argument("--model", default=None, help="如 claude-sonnet-5，默认用 CLI 默认模型")
+    ap.add_argument(
+        "--budget", type=float, default=1.0, help="本次运行的成本上限（美元），超了就中止"
+    )
+    ap.add_argument("--no-screen", action="store_true", help="跳过确定性粗筛，全部送审")
     args = ap.parse_args()
 
     path = Path(args.fetched)
@@ -110,7 +126,22 @@ async def main() -> int:
     print(f"取数 {len(fetched)} 条报价 → 合并 {len(ranked)} 个候选（排序: {args.sort}）")
 
     subject = ranked[: args.limit]
-    print(f"送审前 {len(subject)} 个候选\n")
+
+    # 确定性粗筛：把没有任何可疑信号的候选挡在 agent 之外
+    if not args.no_screen:
+        to_review, screen_results = screen_all(subject)
+        skipped = [r for r in screen_results if not r.needs_review]
+        print(f"粗筛：{len(subject)} 个候选 → {len(to_review)} 个需送审，{len(skipped)} 个跳过")
+        for r in skipped:
+            segs = r.candidate.itinerary.segments
+            route = "→".join([segs[0].dep_airport] + [s.arr_airport for s in segs])
+            print(f"  跳过 {route}: {'; '.join(r.reasons)}")
+        subject = to_review
+        if not subject:
+            print("\n没有候选需要 agent 审查（全部通过粗筛）。")
+            return 0
+
+    print(f"\n送审 {len(subject)} 个候选\n")
     for i, c in enumerate(subject, 1):
         segs = c.itinerary.segments
         route = "→".join([segs[0].dep_airport] + [s.arr_airport for s in segs])
@@ -124,10 +155,36 @@ async def main() -> int:
         )
 
     # 步骤 5：风险审查 agent
+    #
+    # 先用一个小批次探成本，据此推算全量并对照预算——第一次跑真实数据
+    # 时花了 $1.8 才知道单价，那时候已经花掉了。现在超预算直接中止。
     print(f"\n{'=' * 72}\n步骤 5：风险审查 agent\n{'=' * 72}")
     stats: list[dict] = []
     t0 = time.monotonic()
-    risks_by_key = await review_all(subject, stats)
+
+    probe_n = min(args.batch_size, len(subject))
+    probe = subject[:probe_n]
+    risks_by_key = await review_batch(probe, stats, model=args.model)
+    est = CostEstimate(
+        probe_cost=cost_of(stats),
+        probe_candidates=candidates_covered(stats),
+        total_candidates=len(subject),
+        batch_size=args.batch_size,
+    )
+    print(f"成本探测: {est.render()}  (预算 ${args.budget:.2f})")
+    try:
+        budget_check(est, args.budget)
+    except BudgetExceeded as e:
+        print(f"\n中止: {e}", file=sys.stderr)
+        return 2
+
+    rest = subject[probe_n:]
+    if rest:
+        risks_by_key.update(
+            await review_all(
+                rest, stats, batch_size=args.batch_size, model=args.model
+            )
+        )
     elapsed = time.monotonic() - t0
 
     total_risks = 0

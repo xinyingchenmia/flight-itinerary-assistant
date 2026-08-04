@@ -51,13 +51,42 @@ async def lookup_transit_visa(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "lookup_last_ground_transit",
-    "查询到达某机场在某个当地时间点后是否还有地面交通（末班机场大巴/地铁）",
-    {"airport": str, "arrival_local_time": str},
+    "查询某个当地时间点从机场出发是否还有到指定目的地的地面交通"
+    "（末班机场大巴/轨道交通/夜班车），以及打车大致费用和耗时",
+    {
+        "airport": str,
+        "depart_airport_local_time": str,
+        "destination": str,
+        "public_transport_only": bool,
+    },
 )
 async def lookup_last_ground_transit(args: dict[str, Any]) -> dict[str, Any]:
     # v1: 换成真实城市交通时刻查询
+    #
+    # 注意入参是"出航站楼时刻"而不是"落地时刻"——落地到走出航站楼之间还有
+    # 滑行、下机、入境、取行李，国际航班常常是 40-90 分钟。这个换算由
+    # 调用方（agent）根据行程判断，工具只按给定时刻查。
     return _text(
-        f"lookup_last_ground_transit({args['airport']} @ {args['arrival_local_time']}): {_NO_DATA}"
+        f"lookup_last_ground_transit({args['airport']} @ "
+        f"{args['depart_airport_local_time']} → {args['destination']}): {_NO_DATA}"
+    )
+
+
+@tool(
+    "lookup_entry_procedure",
+    "查询在某机场入境所需的典型时长（入境审查+提取行李+海关+重新托运+"
+    "二次安检），以及该机场是否要求转机旅客入境",
+    {"airport": str, "nationality": str, "is_first_port_of_entry": bool},
+)
+async def lookup_entry_procedure(args: dict[str, Any]) -> dict[str, Any]:
+    # v1: 换成真实数据源（各机场公布的 connection time、CBP 排队统计等）
+    #
+    # 「美国首个入境口岸必须提取行李重新托运」这条制度性规则是稳定的，
+    # 已经写进 agent 的 system prompt，不依赖这个工具。这里查的是具体
+    # 机场的时长数据——那部分会变，必须查。
+    return _text(
+        f"lookup_entry_procedure({args['airport']}, {args['nationality']}, "
+        f"first_port={args['is_first_port_of_entry']}): {_NO_DATA}"
     )
 
 
@@ -65,7 +94,12 @@ def build_server():
     return create_sdk_mcp_server(
         name="risk_tools",
         version="0.1.0",
-        tools=[lookup_mct, lookup_transit_visa, lookup_last_ground_transit],
+        tools=[
+            lookup_mct,
+            lookup_transit_visa,
+            lookup_last_ground_transit,
+            lookup_entry_procedure,
+        ],
     )
 
 
@@ -73,4 +107,5 @@ ALLOWED_TOOLS = [
     "mcp__risk_tools__lookup_mct",
     "mcp__risk_tools__lookup_transit_visa",
     "mcp__risk_tools__lookup_last_ground_transit",
+    "mcp__risk_tools__lookup_entry_procedure",
 ]

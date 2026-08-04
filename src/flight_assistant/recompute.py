@@ -50,13 +50,23 @@ def apply_updates(
 def _set_by_path(data: dict, path: str, value: object) -> None:
     parts = path.split(".")
     cur: object = data
-    for part in parts[:-1]:
-        cur = cur[int(part)] if isinstance(cur, list) else cur[part]
-    last = parts[-1]
-    if isinstance(cur, list):
-        cur[int(last)] = value
-    else:
-        cur[last] = value
+    try:
+        for part in parts[:-1]:
+            cur = cur[int(part)] if isinstance(cur, list) else cur[part]
+        last = parts[-1]
+        if isinstance(cur, list):
+            cur[int(last)] = value
+        elif last not in cur:
+            raise KeyError(last)
+        else:
+            cur[last] = value
+    except (KeyError, IndexError, ValueError) as e:
+        # 澄清对话 agent 曾写出 passenger.nationality 这种模型里不存在的路径。
+        # 工具层的白名单是第一道拦截，这里是第二道，保证给出可读的错误而不是
+        # 一个裸 KeyError。
+        raise ValueError(
+            f"字段路径 {path!r} 在数据模型里不存在（卡在 {e}）"
+        ) from e
 
 
 def risks_needing_recheck(

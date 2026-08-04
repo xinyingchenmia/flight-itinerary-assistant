@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
@@ -68,9 +68,35 @@ class FlightPriceComparison(BaseModel):
     price_spread: Decimal  # max - min
 
 
+class TripContext(BaseModel):
+    """行程之外、但风险判断必需的用户侧信息。
+
+    买票平台不会问这些，可它们决定了一半的风险是否成立：同一个 40 分钟
+    中转，持美签直飞过境和需要入境清关重挂行李，结论完全不同；同一个
+    23:50 落地，去市区和去机场旁边的酒店，结论也完全不同。
+
+    全部字段可为 None = 未知。澄清对话 agent 只应追问那些「答案会改变
+    排序」的字段，不是把这张表当问卷填满。
+    """
+
+    nationality: str | None = None  # 护照国籍，如 "CN"
+    passport_expiry: date | None = None
+    # 已持有的签证：国家码 → 说明，如 {"US": "B1/B2 有效至 2031"}
+    visas: dict[str, str] = {}
+    # 落地后要去哪。决定 arrival_no_ground_transit 是否成立——
+    # 去市区和去机场酒店是两种结论。
+    destination_after_arrival: str | None = None
+    # 能接受的地面交通方式。只能打车 vs 必须公共交通，会改变排序。
+    ground_transport_ok: Literal["taxi_ok", "public_only", "unknown"] = "unknown"
+    checked_bags: int | None = None  # 托运件数；0 件时行李直挂风险不成立
+
+
 class Risk(BaseModel):
     kind: Literal[
         "mct_tight",
+        # 需要入境/清关/重新托运的中转（美国首个入境口岸是典型），
+        # 和单纯的 mct_tight 分开：成因不同、可缓解手段不同、时长量级也不同
+        "entry_connection_tight",
         "no_through_baggage",
         "self_transfer_no_protection",
         "transit_visa_required",

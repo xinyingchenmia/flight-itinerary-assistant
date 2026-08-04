@@ -10,7 +10,13 @@ from dataclasses import dataclass, field
 from flight_assistant.clarification.agent import AnswerFn, clarify
 from flight_assistant.filtering import TripRequest, filter_and_sort
 from flight_assistant.matching import group_and_compare
-from flight_assistant.models import FlightPriceComparison, Itinerary, PlatformOffer, Risk
+from flight_assistant.models import (
+    FlightPriceComparison,
+    Itinerary,
+    PlatformOffer,
+    Risk,
+    TripContext,
+)
 from flight_assistant.recompute import apply_updates, risks_needing_recheck
 from flight_assistant.risk_review.agent import review_all
 
@@ -21,6 +27,7 @@ class Result:
 
     ranked: list[FlightPriceComparison]
     risks_by_key: dict[str, list[Risk]]
+    trip_context: TripContext = field(default_factory=TripContext)
     missing_platforms: list[str] = field(default_factory=list)
     unresolved_unknowns: list[str] = field(default_factory=list)
 
@@ -30,6 +37,7 @@ async def run(
     fetched: list[tuple[Itinerary, PlatformOffer]],
     answer_fn: AnswerFn,
     missing_platforms: list[str] | None = None,
+    trip_context: TripContext | None = None,
 ) -> Result:
     # 步骤 3.5：跨平台匹配 + 比价（确定性）
     comparisons = group_and_compare(fetched)
@@ -38,10 +46,10 @@ async def run(
     ranked = filter_and_sort(comparisons, req)
 
     # 步骤 5：风险审查 agent
-    risks_by_key = await review_all(ranked)
+    risks_by_key = await review_all(ranked, trip_context=trip_context)
 
     # 步骤 6：澄清对话 agent（只处理 needs_user_input=True 的项）
-    updates = await clarify(risks_by_key, answer_fn)
+    updates, trip_context = await clarify(risks_by_key, answer_fn, trip_context=trip_context)
 
     if updates:
         # 步骤 7：针对性重算——只重算受影响候选
@@ -52,7 +60,11 @@ async def run(
         recheck = risks_needing_recheck(risks_by_key, touched)
         if recheck:
             affected = [c for c in ranked if c.itinerary_key in touched]
-            risks_by_key.update(await review_all(affected))
+            risks_by_key.update(await review_all(affected, trip_context=trip_context))
+    elif trip_context != TripContext():
+        # 澄清没改行程字段，但补上了用户侧信息（国籍、落地后去哪等）。
+        # 这些信息本身就会改变风险结论，所以全量重审一次。
+        risks_by_key = await review_all(ranked, trip_context=trip_context)
 
     unresolved = [
         f"{key}: {r.kind} — {r.evidence}"
@@ -64,6 +76,7 @@ async def run(
     return Result(
         ranked=ranked,
         risks_by_key=risks_by_key,
+        trip_context=trip_context or TripContext(),
         missing_platforms=missing_platforms or [],
         unresolved_unknowns=unresolved,
     )

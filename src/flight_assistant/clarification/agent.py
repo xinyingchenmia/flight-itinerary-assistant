@@ -55,17 +55,23 @@ def build_options(collector: UpdateCollector) -> ClaudeAgentOptions:
     )
 
 
-def _pending(risks_by_key: dict[str, list[Risk]]) -> dict[str, list[dict]]:
+def _risks_of(findings) -> list[Risk]:
+    """findings 是 (risks, assurances)；澄清只关心 risks。"""
+    return findings[0] if isinstance(findings, tuple) else findings
+
+
+def _pending(risks_by_key: dict) -> dict[str, list[dict]]:
     """只保留 needs_user_input=True 的项。"""
     out: dict[str, list[dict]] = {}
-    for key, risks in risks_by_key.items():
+    for key, findings in risks_by_key.items():
+        risks = _risks_of(findings)
         flagged = [r.model_dump(mode="json") for r in risks if r.needs_user_input]
         if flagged:
             out[key] = flagged
     return out
 
 
-def _compact_pending(risks_by_key: dict[str, list[Risk]]) -> list[dict]:
+def _compact_pending(risks_by_key: dict) -> list[dict]:
     """把待澄清项压缩成按风险类型聚合的紧凑清单。
 
     为什么要压：实测一轮澄清对话花了 $0.1511，因为每轮都把 11 条风险的
@@ -77,8 +83,8 @@ def _compact_pending(risks_by_key: dict[str, list[Risk]]) -> list[dict]:
     聚合后一条就够，agent 也更容易看出"问一次能解决 4 个候选"。
     """
     by_kind: dict[str, dict] = {}
-    for key, risks in risks_by_key.items():
-        for r in risks:
+    for key, findings in risks_by_key.items():
+        for r in _risks_of(findings):
             if not r.needs_user_input:
                 continue
             slot = by_kind.setdefault(
@@ -105,7 +111,7 @@ def _compact_pending(risks_by_key: dict[str, list[Risk]]) -> list[dict]:
 
 
 async def clarify(
-    risks_by_key: dict[str, list[Risk]],
+    risks_by_key: dict,
     answer_fn: AnswerFn,
     max_turns: int = 8,
     trip_context: TripContext | None = None,

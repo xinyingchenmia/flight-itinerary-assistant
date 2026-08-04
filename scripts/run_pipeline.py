@@ -37,6 +37,8 @@ from flight_assistant.matching import group_and_compare  # noqa: E402
 from flight_assistant.models import (  # noqa: E402
     Itinerary,
     PlatformOffer,
+    Assurance,
+    PreferenceNote,
     Risk,
     TripContext,
 )
@@ -126,12 +128,14 @@ def load_fetched(path: Path) -> list[tuple[Itinerary, PlatformOffer]]:
 
 
 async def _review(subject, args, stats, ledger, trip_context=None):
+    soft = args.soft_pref
     """跑风险审查：先用一批探成本，对照预算，再审剩下的。"""
     probe_n = min(args.batch_size, len(subject))
     risks = await review_batch(
         subject[:probe_n],
         stats,
         trip_context=trip_context,
+        soft_preferences=soft,
         model=args.review_model or args.model,
         ledger=ledger,
         web_search=args.web_search,
@@ -155,6 +159,7 @@ async def _review(subject, args, stats, ledger, trip_context=None):
                     rest,
                     stats,
                     trip_context=trip_context,
+                    soft_preferences=soft,
                     batch_size=args.batch_size,
                     model=args.review_model or args.model,
                     ledger=ledger,
@@ -177,16 +182,24 @@ def _print_risk_diff(candidates, before: dict, after: dict) -> None:
     def sig(r):
         return (r.kind, r.severity)
 
+    def risks(d, key):
+        return d.get(key, ([], [], []))[0]
+
+    def oks(d, key):
+        return d.get(key, ([], [], []))[1]
+
     for c in candidates:
         key = c.itinerary_key
-        b = {sig(r) for r in before.get(key, [])}
-        a = {sig(r) for r in after.get(key, [])}
+        b = {sig(r) for r in risks(before, key)}
+        a = {sig(r) for r in risks(after, key)}
         segs = c.itinerary.segments
         route = "→".join([segs[0].dep_airport] + [s.arr_airport for s in segs])
 
         gone = b - a
         new = a - b
-        if not gone and not new:
+        new_oks = [x for x in oks(after, key) if x.statement not in
+                   {y.statement for y in oks(before, key)}]
+        if not gone and not new and not new_oks:
             print(f"  {route}: 无变化（{len(a)} 条风险）")
             continue
         print(f"  {route}:")
@@ -194,19 +207,36 @@ def _print_risk_diff(candidates, before: dict, after: dict) -> None:
             print(f"    - 消除 {kind}/{sev}")
         for kind, sev in sorted(new):
             print(f"    + 新增 {kind}/{sev}")
+        for x in new_oks:
+            print(f"    ✓ {x.statement}")
 
-    nb = sum(len(v) for v in before.values())
-    na = sum(len(v) for v in after.values())
-    bb = sum(1 for v in before.values() for r in v if r.severity == "blocker")
-    ba = sum(1 for v in after.values() for r in v if r.severity == "blocker")
-    print(f"\n  风险总数 {nb} → {na} | blocker {bb} → {ba}")
+    nb = sum(len(v[0]) for v in before.values())
+    na = sum(len(v[0]) for v in after.values())
+    ob = sum(len(v[1]) for v in before.values())
+    oa = sum(len(v[1]) for v in after.values())
+    bb = sum(1 for v in before.values() for r in v[0] if r.severity == "blocker")
+    ba = sum(1 for v in after.values() for r in v[0] if r.severity == "blocker")
+    print(f"\n  风险总数 {nb} → {na} | blocker {bb} → {ba} | 已确认没问题 {ob} → {oa}")
 
 
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--fetched", default="fetched.json")
     ap.add_argument("--limit", type=int, default=8, help="审查前 N 个候选")
-    ap.add_argument("--sort", default="price", choices=["price", "duration", "stops"])
+    ap.add_argument(
+        "--sort",
+        default="price",
+        choices=["price", "duration", "stops", "layover"],
+        help="layover = 按中转等待时长排序（用户确认「中转越短越好」时用）",
+    )
+    ap.add_argument(
+        "--soft-pref",
+        action="append",
+        default=[],
+        metavar="TEXT",
+        help="用户原话里映射不到结构化字段的偏好，可重复。"
+        "如 --soft-pref '转机的地方别太无聊'。代码不解释它的含义",
+    )
     ap.add_argument("--max-stops", type=int, default=None)
     ap.add_argument("--interactive", action="store_true")
     ap.add_argument(
@@ -269,6 +299,7 @@ async def main() -> int:
         date="2026-09-27",
         max_stops=args.max_stops,
         sort_pref=args.sort,
+        soft_preferences=args.soft_pref,
     )
 
     # 步骤 3.5 + 4：确定性代码
@@ -319,7 +350,15 @@ async def main() -> int:
     if cache_path and cache_path.exists():
         raw_cache = json.loads(cache_path.read_text())
         risks_by_key = {
-            k: [Risk.model_validate(r) for r in v] for k, v in raw_cache.items()
+            k: (
+                [Risk.model_validate(r) for r in v["risks"]],
+                [Assurance.model_validate(a) for a in v.get("assurances", [])],
+                [
+                    PreferenceNote.model_validate(n)
+                    for n in v.get("preference_notes", [])
+                ],
+            )
+            for k, v in raw_cache.items()
         }
         print(f"从缓存读取风险审查结果: {cache_path}（未花费）")
         elapsed = 0.0
@@ -330,8 +369,14 @@ async def main() -> int:
             cache_path.write_text(
                 json.dumps(
                     {
-                        k: [r.model_dump(mode="json") for r in v]
-                        for k, v in risks_by_key.items()
+                        k: {
+                            "risks": [r.model_dump(mode="json") for r in rs],
+                            "assurances": [a.model_dump(mode="json") for a in asr],
+                            "preference_notes": [
+                                n.model_dump(mode="json") for n in notes
+                            ],
+                        }
+                        for k, (rs, asr, notes) in risks_by_key.items()
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -340,27 +385,36 @@ async def main() -> int:
             print(f"风险审查结果已缓存到 {cache_path}")
 
     total_risks = 0
+    total_ok = 0
     blockers = 0
     needs_input = 0
     for i, c in enumerate(subject, 1):
-        risks = risks_by_key[c.itinerary_key]
+        risks, assurances, notes = risks_by_key[c.itinerary_key]
         total_risks += len(risks)
+        total_ok += len(assurances)
         blockers += sum(1 for r in risks if r.severity == "blocker")
         needs_input += sum(1 for r in risks if r.needs_user_input)
         segs = c.itinerary.segments
         route = "→".join([segs[0].dep_airport] + [s.arr_airport for s in segs])
         print(f"\n候选 {i} ({route}, ¥{min(o.price for o in c.offers)}):")
-        if not risks:
-            print("  （无风险）")
+        if not risks and not assurances and not notes:
+            print("  （无结论）")
         for r in risks:
             tag = " [需追问]" if r.needs_user_input else ""
             print(f"  ● {r.kind}/{r.severity}{tag}")
             print(f"    {r.evidence}")
+        for a in assurances:
+            print(f"  ✓ {a.statement}")
+            print(f"    依据: {a.evidence}")
+        for n in notes:
+            icon = {"good": "☺", "poor": "☹", "unknown": "?"}[n.verdict]
+            print(f"  {icon} [{n.preference}] {n.statement}")
+            print(f"    依据: {n.evidence}")
 
     print(f"\n{'-' * 72}")
     print(
         f"合计 {total_risks} 条风险 | blocker {blockers} | 需追问 {needs_input} | "
-        f"耗时 {elapsed:.1f}s"
+        f"已确认没问题 {total_ok} 条 | 耗时 {elapsed:.1f}s"
     )
     covered = candidates_covered(stats)
     spent = cost_of(stats)
@@ -377,7 +431,7 @@ async def main() -> int:
     # 步骤 6：澄清对话 agent
     print(f"\n{'=' * 72}\n步骤 6：澄清对话 agent\n{'=' * 72}")
     flagged = sum(
-        1 for risks in risks_by_key.values() for r in risks if r.needs_user_input
+        1 for rs, *_ in risks_by_key.values() for r in rs if r.needs_user_input
     )
     print(f"标记 needs_user_input 的风险共 {flagged} 条")
     print(f"应答模式: {'真人交互' if args.interactive else '预设画像'}")
@@ -434,10 +488,10 @@ async def main() -> int:
 
     # 步骤 9：剩余未知项
     unresolved = [
-        r for risks in risks_by_key.values() for r in risks if r.needs_user_input
+        r for rs, *_ in risks_by_key.values() for r in rs if r.needs_user_input
     ]
     before_unresolved = sum(
-        1 for risks in risks_before.values() for r in risks if r.needs_user_input
+        1 for rs, *_ in risks_before.values() for r in rs if r.needs_user_input
     )
     print(
         f"剩余未知项 {len(unresolved)} 条（澄清前 {before_unresolved} 条，"

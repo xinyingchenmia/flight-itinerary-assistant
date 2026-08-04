@@ -95,22 +95,68 @@ class TripContext(BaseModel):
     # 能接受的地面交通方式。只能打车 vs 必须公共交通，会改变排序。
     ground_transport_ok: Literal["taxi_ok", "public_only", "unknown"] = "unknown"
     checked_bags: int | None = None  # 托运件数；0 件时行李直挂风险不成立
+    # 中转体验偏好。"转机地别太无聊"这句话有两种相反的解读——想在中转地
+    # 逛逛（那就偏好长中转 + 好玩的航站楼），还是嫌等得烦（那就偏好短中转）。
+    # 猜错了排序会完全反过来，所以这是澄清 agent 该问的典型问题。
+    layover_preference: Literal[
+        "shorter",  # 中转越短越好
+        "explore",  # 愿意长中转，希望中转地有的逛
+        "no_preference",
+        "unknown",
+    ] = "unknown"
+
+
+RiskKind = Literal[
+    "mct_tight",
+    # 需要入境/清关/重新托运的中转（美国首个入境口岸是典型），
+    # 和单纯的 mct_tight 分开：成因不同、可缓解手段不同、时长量级也不同
+    "entry_connection_tight",
+    "no_through_baggage",
+    "self_transfer_no_protection",
+    "transit_visa_required",
+    "last_flight_of_day",
+    "terminal_change",
+    "arrival_no_ground_transit",
+    "passport_validity",
+]
+
+
+class PreferenceNote(BaseModel):
+    """针对用户主观偏好的结论。
+
+    和 Risk / Assurance 分开：Risk 是"会导致行程失败"，Assurance 是"查过了
+    没问题"，而这里是"就你在意的那件事而言，这个候选怎么样"。主观偏好没有
+    blocker/major/minor 的语义——"中转地没什么好逛的"不是故障。
+
+    verdict 用于排序时的加权，不参与过滤：主观偏好不该把候选直接删掉。
+    """
+
+    preference: str  # 对应用户原话里的哪个偏好
+    verdict: Literal["good", "poor", "unknown"]
+    statement: str  # 给用户看的一句话
+    evidence: str  # 依据。查过的要写来源
+    affected_segments: list[int]
+
+
+class Assurance(BaseModel):
+    """查过了、确认没问题的项。
+
+    只有 Risk 的话，用户看到的永远是坏消息，看不到"哪些事已经替他确认过"。
+    实测 agent 联网查到「CTA 蓝线 O'Hare 站 24 小时运营」，这个结论只体现
+    为"风险降级"，正面信息被丢掉了——而"你半夜落地也有地铁进市区"恰恰是
+    用户最想知道的那类话。
+
+    和 Risk 共用 topic 枚举，这样同一个关注点上"有问题/没问题"能配对。
+    """
+
+    topic: RiskKind
+    statement: str  # 给用户看的结论，一句话
+    evidence: str  # 依据：具体数字或来源
+    affected_segments: list[int]
 
 
 class Risk(BaseModel):
-    kind: Literal[
-        "mct_tight",
-        # 需要入境/清关/重新托运的中转（美国首个入境口岸是典型），
-        # 和单纯的 mct_tight 分开：成因不同、可缓解手段不同、时长量级也不同
-        "entry_connection_tight",
-        "no_through_baggage",
-        "self_transfer_no_protection",
-        "transit_visa_required",
-        "last_flight_of_day",
-        "terminal_change",
-        "arrival_no_ground_transit",
-        "passport_validity",
-    ]
+    kind: RiskKind
     severity: Literal["blocker", "major", "minor"]
     evidence: str  # 必须引用具体数据，禁止笼统表述
     affected_segments: list[int]

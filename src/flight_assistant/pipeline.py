@@ -12,6 +12,7 @@ from flight_assistant.clarification.agent import AnswerFn, clarify
 from flight_assistant.filtering import TripRequest, filter_and_sort
 from flight_assistant.matching import group_and_compare
 from flight_assistant.models import (
+    Assurance,
     FlightPriceComparison,
     Itinerary,
     PlatformOffer,
@@ -27,7 +28,8 @@ class Result:
     """步骤 9：最终结果。排序清单 + 依据 + 未知项标注。"""
 
     ranked: list[FlightPriceComparison]
-    risks_by_key: dict[str, list[Risk]]
+    # {itinerary_key: (风险, 已确认没问题的项)}
+    risks_by_key: dict[str, tuple[list[Risk], list[Assurance]]]
     trip_context: TripContext = field(default_factory=TripContext)
     missing_platforms: list[str] = field(default_factory=list)
     unresolved_unknowns: list[str] = field(default_factory=list)
@@ -79,7 +81,7 @@ async def run(
 
     unresolved = [
         f"{key}: {r.kind} — {r.evidence}"
-        for key, risks in risks_by_key.items()
+        for key, (risks, _) in risks_by_key.items()
         for r in risks
         if r.needs_user_input
     ]

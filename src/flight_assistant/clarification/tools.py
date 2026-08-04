@@ -34,6 +34,7 @@ TRIP_CONTEXT_FIELDS = {
     "destination_after_arrival",
     "ground_transport_ok",
     "checked_bags",
+    "layover_preference",
 }
 
 

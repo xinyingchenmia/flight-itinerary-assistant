@@ -12,7 +12,19 @@ from typing import Any
 from claude_agent_sdk import ClaudeAgentOptions, query
 
 from flight_assistant.budget import BudgetLedger
-from flight_assistant.models import FlightPriceComparison, Risk, TripContext
+from flight_assistant.models import (
+    Assurance,
+    FlightPriceComparison,
+    PreferenceNote,
+    Risk,
+    TripContext,
+)
+
+# 一个候选的审查结论：
+#   risks       —— 会导致行程失败或劣化的问题
+#   assurances  —— 查过了、确认没问题的项（只报坏消息的话用户看不到已经替他确认过什么）
+#   pref_notes  —— 针对用户主观偏好的结论（中转地好不好逛之类）
+Findings = tuple[list[Risk], list[Assurance], list[PreferenceNote]]
 from flight_assistant.risk_review import tools as risk_tools
 
 SYSTEM_PROMPT = """你审查机票行程的风险，输出结构化的 Risk 列表。
@@ -57,6 +69,43 @@ SYSTEM_PROMPT = """你审查机票行程的风险，输出结构化的 Risk 列�
 
 5. **末班航班 / 换航站楼 / 护照有效期**
 
+## 同时报告"查过了、没问题"的项（assurances）
+
+只报坏消息的话，用户看不到哪些事已经替他确认过。凡是你实际查证过、
+结论是"没问题"的关注点，写成一条 assurance，用用户会读的那种话：
+
+  "半夜 00:14 落地 ORD 也能进市区：CTA 蓝线 O'Hare 站 24 小时运营"
+  "SFO 入境后有 207 分钟衔接，够走完入境+取行李+重新托运+安检"
+  "香港中转全程空侧，持中国护照不需要过境签"
+
+规则：
+- **只写你真的查证过或能确切引用规则的项**，不要为了凑数写"航班号正常"
+  这类空话。没查过的不要写成 assurance。
+- 每个候选最多 3 条，每条 statement 一句话（≤60 字），evidence 写依据
+  （数字 + 来源）。
+- 只写用户会担心的那几类：能不能赶上中转、半夜到了怎么走、要不要签证、
+  行李会不会跟丢。
+- 同一个 topic 上已经报了 Risk 就不要再写 assurance，两者不能自相矛盾。
+
+## 用户的主观偏好（soft_preferences）
+
+输入里的 soft_preferences 是用户原话里那些映射不到结构化字段的要求，比如
+"转机的地方别太无聊"。对每条偏好，按它实际的含义处理：
+
+- **如果 trip_context.layover_preference 已经是 explore**：用户想在中转地
+  逛逛。那就去查中转机场/航站楼实际有什么（观景台、免税区规模、能不能出
+  机场进市区、有无过夜设施），结合衔接时长给结论，写成 preference_note。
+  例："HND T3 有观景台和江户小路餐饮区，295 分钟衔接足够逛完再回来登机"
+- **如果是 shorter**：用户嫌等得烦。这时不用查航站楼有什么，直接按中转
+  时长给结论即可（排序由代码按 layover 时长做，你不用管排序）。
+- **如果是 unknown**：这句话有歧义，两种解读会导出相反的排序。**不要替
+  用户拍一个解读**——报一条 needs_user_input=true 的 Risk（kind 取最接近的，
+  没有合适的就不报 Risk），或者写一条 verdict="unknown" 的 preference_note
+  说明缺什么信息。消歧是澄清对话 agent 的事。
+
+preference_note 的 verdict 只影响排序权重，不参与过滤——主观偏好不该把
+候选直接删掉。查不到的写 verdict="unknown"，不要凭印象说某个机场好玩。
+
 ## 硬约束
 
 - 每条 evidence 必须引用具体数字或具体规则。"衔接 95 分钟，而 ORD 是本
@@ -87,6 +136,47 @@ SYSTEM_PROMPT = """你审查机票行程的风险，输出结构化的 Risk 列�
 这些是事实。你的工作是判断这些事实意味着什么，不是重新算一遍。
 """
 
+_RISK_KINDS = [
+    "mct_tight",
+    "entry_connection_tight",
+    "no_through_baggage",
+    "self_transfer_no_protection",
+    "transit_visa_required",
+    "last_flight_of_day",
+    "terminal_change",
+    "arrival_no_ground_transit",
+    "passport_validity",
+]
+
+_PREFERENCE_ITEM = {
+    "type": "object",
+    "properties": {
+        "preference": {"type": "string"},
+        "verdict": {"type": "string", "enum": ["good", "poor", "unknown"]},
+        "statement": {"type": "string"},
+        "evidence": {"type": "string"},
+        "affected_segments": {"type": "array", "items": {"type": "integer"}},
+    },
+    "required": [
+        "preference",
+        "verdict",
+        "statement",
+        "evidence",
+        "affected_segments",
+    ],
+}
+
+_ASSURANCE_ITEM = {
+    "type": "object",
+    "properties": {
+        "topic": {"type": "string", "enum": _RISK_KINDS},
+        "statement": {"type": "string"},
+        "evidence": {"type": "string"},
+        "affected_segments": {"type": "array", "items": {"type": "integer"}},
+    },
+    "required": ["topic", "statement", "evidence", "affected_segments"],
+}
+
 _RISK_SCHEMA = {
     "type": "object",
     "properties": {
@@ -95,20 +185,7 @@ _RISK_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "kind": {
-                        "type": "string",
-                        "enum": [
-                            "mct_tight",
-                            "entry_connection_tight",
-                            "no_through_baggage",
-                            "self_transfer_no_protection",
-                            "transit_visa_required",
-                            "last_flight_of_day",
-                            "terminal_change",
-                            "arrival_no_ground_transit",
-                            "passport_validity",
-                        ],
-                    },
+                    "kind": {"type": "string", "enum": _RISK_KINDS},
                     "severity": {
                         "type": "string",
                         "enum": ["blocker", "major", "minor"],
@@ -132,9 +209,11 @@ _RISK_SCHEMA = {
                     "cost_if_realized",
                 ],
             },
-        }
+        },
+        "assurances": {"type": "array", "items": _ASSURANCE_ITEM},
+        "preference_notes": {"type": "array", "items": _PREFERENCE_ITEM},
     },
-    "required": ["risks"],
+    "required": ["risks", "assurances", "preference_notes"],
 }
 
 
@@ -205,7 +284,9 @@ def build_connections(it) -> list[dict[str, Any]]:
 
 
 def build_context(
-    candidate: FlightPriceComparison, trip_context: TripContext | None = None
+    candidate: FlightPriceComparison,
+    trip_context: TripContext | None = None,
+    soft_preferences: list[str] | None = None,
 ) -> dict[str, Any]:
     """把代码能确定算出的事实预先算好，避免 agent 去推断。
 
@@ -226,6 +307,8 @@ def build_context(
         ],
         "cheapest_platform": candidate.cheapest_platform,
         "trip_context": (trip_context or TripContext()).model_dump(mode="json"),
+        # 用户原话里映射不到结构化字段的偏好。代码不解释它们的含义。
+        "soft_preferences": soft_preferences or [],
     }
 
 
@@ -317,13 +400,14 @@ async def review_candidate(
     candidate: FlightPriceComparison,
     stats: list[dict] | None = None,
     trip_context: TripContext | None = None,
-) -> list[Risk]:
-    """审查单个候选，返回 Risk 列表。
+    soft_preferences: list[str] | None = None,
+) -> Findings:
+    """审查单个候选，返回 (风险, 已确认没问题的项, 偏好结论)。
 
     stats 不为 None 时，往里追加一条本次调用的成本/耗时记录——评测集里的
     「单次审计成本 vs 可避免损失」指标需要这个数据。
     """
-    ctx = build_context(candidate, trip_context)
+    ctx = build_context(candidate, trip_context, soft_preferences)
     prompt = (
         "审查这个候选行程的风险，按 schema 输出 risks 数组：\n"
         + json.dumps(ctx, ensure_ascii=False, indent=2)
@@ -351,7 +435,14 @@ async def review_candidate(
         raise RuntimeError(f"风险审查未返回结果: {ctx['itinerary_key']}")
 
     payload = json.loads(raw) if isinstance(raw, str) else raw
-    return [Risk.model_validate(r) for r in payload["risks"]]
+    return (
+        [Risk.model_validate(r) for r in payload["risks"]],
+        [Assurance.model_validate(a) for a in payload.get("assurances", [])],
+        [
+            PreferenceNote.model_validate(n)
+            for n in payload.get("preference_notes", [])
+        ],
+    )
 
 
 # 批量审查的输出 schema：按候选序号回填，避免在输出里重复长长的
@@ -366,8 +457,18 @@ _BATCH_SCHEMA = {
                 "properties": {
                     "candidate_id": {"type": "integer"},
                     "risks": _RISK_SCHEMA["properties"]["risks"],
+                    "assurances": {"type": "array", "items": _ASSURANCE_ITEM},
+                    "preference_notes": {
+                        "type": "array",
+                        "items": _PREFERENCE_ITEM,
+                    },
                 },
-                "required": ["candidate_id", "risks"],
+                "required": [
+                    "candidate_id",
+                    "risks",
+                    "assurances",
+                    "preference_notes",
+                ],
             },
         }
     },
@@ -384,7 +485,8 @@ async def review_batch(
     web_search: bool = False,
     max_searches: int = 6,
     reserve: float = 0.0,
-) -> dict[str, list[Risk]]:
+    soft_preferences: list[str] | None = None,
+) -> dict[str, Findings]:
     """一次调用审查一批候选。
 
     为什么批量：system prompt 有 1500+ 字，逐个候选调用就要付 N 遍。
@@ -401,7 +503,7 @@ async def review_batch(
         )
 
     payload = [
-        {"candidate_id": i, **build_context(c, trip_context)}
+        {"candidate_id": i, **build_context(c, trip_context, soft_preferences)}
         for i, c in enumerate(candidates)
     ]
     prompt = (
@@ -446,14 +548,19 @@ async def review_batch(
         raise RuntimeError("批量风险审查未返回结果")
 
     parsed = json.loads(raw) if isinstance(raw, str) else raw
-    out: dict[str, list[Risk]] = {c.itinerary_key: [] for c in candidates}
+    out: dict[str, Findings] = {c.itinerary_key: ([], [], []) for c in candidates}
     for row in parsed["results"]:
         idx = row["candidate_id"]
         if not 0 <= idx < len(candidates):
             continue  # 序号越界就丢弃，不猜它指的是哪个候选
-        out[candidates[idx].itinerary_key] = [
-            Risk.model_validate(r) for r in row["risks"]
-        ]
+        out[candidates[idx].itinerary_key] = (
+            [Risk.model_validate(r) for r in row["risks"]],
+            [Assurance.model_validate(a) for a in row.get("assurances", [])],
+            [
+                PreferenceNote.model_validate(n)
+                for n in row.get("preference_notes", [])
+            ],
+        )
     return out
 
 
@@ -468,7 +575,8 @@ async def review_all(
     web_search: bool = False,
     max_searches: int = 6,
     reserve: float = 0.0,
-) -> dict[str, list[Risk]]:
+    soft_preferences: list[str] | None = None,
+) -> dict[str, Findings]:
     """审查多个候选：分批 + 批间并发。
 
     两层优化都是实测数据驱动的：
@@ -478,10 +586,10 @@ async def review_all(
     if batch_size <= 1:
         sem = asyncio.Semaphore(concurrency)
 
-        async def one(c: FlightPriceComparison) -> tuple[str, list[Risk]]:
+        async def one(c: FlightPriceComparison) -> tuple[str, Findings]:
             async with sem:
                 return c.itinerary_key, await review_candidate(
-                    c, stats, trip_context
+                    c, stats, trip_context, soft_preferences
                 )
 
         return dict(await asyncio.gather(*(one(c) for c in candidates)))
@@ -503,7 +611,7 @@ async def review_all(
 
     sem = asyncio.Semaphore(concurrency)
 
-    async def run_batch(batch: list[FlightPriceComparison]) -> dict[str, list[Risk]]:
+    async def run_batch(batch: list[FlightPriceComparison]) -> dict[str, Findings]:
         async with sem:
             return await review_batch(
                 batch,
@@ -514,9 +622,10 @@ async def review_all(
                 web_search,
                 max_searches,
                 reserve,
+                soft_preferences,
             )
 
-    merged: dict[str, list[Risk]] = {}
+    merged: dict[str, Findings] = {}
     for part in await asyncio.gather(*(run_batch(b) for b in batches)):
         merged.update(part)
     return merged

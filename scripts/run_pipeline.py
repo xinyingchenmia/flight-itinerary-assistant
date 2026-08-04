@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from flight_assistant.budget import (  # noqa: E402
     BudgetExceeded,
+    BudgetLedger,
     CostEstimate,
     candidates_covered,
 )
@@ -102,9 +103,29 @@ async def main() -> int:
     )
     ap.add_argument("--model", default=None, help="如 claude-sonnet-5，默认用 CLI 默认模型")
     ap.add_argument(
-        "--budget", type=float, default=1.0, help="本次运行的成本上限（美元），超了就中止"
+        "--budget",
+        type=float,
+        default=0.5,
+        help="本次查询所有路径的成本上限（美元）。含风险审查各批次 + 澄清对话各轮",
     )
     ap.add_argument("--no-screen", action="store_true", help="跳过确定性粗筛，全部送审")
+    ap.add_argument(
+        "--web-search",
+        action="store_true",
+        help="给风险审查 agent 联网检索能力（任意国家/机场都能自己查，不限于预设列表）",
+    )
+    ap.add_argument("--max-searches", type=int, default=4, help="每批次的搜索次数上限")
+    ap.add_argument(
+        "--review-model",
+        default=None,
+        help="风险审查用的模型。审查是成本大头，用便宜模型能腾出额度给澄清对话",
+    )
+    ap.add_argument(
+        "--clarify-reserve",
+        type=float,
+        default=0.15,
+        help="给澄清对话预留的额度。风险审查不许花到这部分",
+    )
     args = ap.parse_args()
 
     path = Path(args.fetched)
@@ -162,9 +183,25 @@ async def main() -> int:
     stats: list[dict] = []
     t0 = time.monotonic()
 
+    # 账本覆盖这次查询里所有花钱的调用：风险审查各批次 + 澄清对话各轮。
+    ledger = BudgetLedger(cap=args.budget)
+
     probe_n = min(args.batch_size, len(subject))
     probe = subject[:probe_n]
-    risks_by_key = await review_batch(probe, stats, model=args.model)
+    try:
+        risks_by_key = await review_batch(
+            probe,
+            stats,
+            model=args.review_model or args.model,
+            ledger=ledger,
+            web_search=args.web_search,
+            max_searches=args.max_searches,
+            reserve=args.clarify_reserve,
+        )
+    except BudgetExceeded as e:
+        print(f"\n中止: {e}", file=sys.stderr)
+        return 2
+
     est = CostEstimate(
         probe_cost=cost_of(stats),
         probe_candidates=candidates_covered(stats),
@@ -176,15 +213,26 @@ async def main() -> int:
         budget_check(est, args.budget)
     except BudgetExceeded as e:
         print(f"\n中止: {e}", file=sys.stderr)
+        print(ledger.render(), file=sys.stderr)
         return 2
 
     rest = subject[probe_n:]
     if rest:
-        risks_by_key.update(
-            await review_all(
-                rest, stats, batch_size=args.batch_size, model=args.model
+        try:
+            risks_by_key.update(
+                await review_all(
+                    rest,
+                    stats,
+                    batch_size=args.batch_size,
+                    model=args.review_model or args.model,
+                    ledger=ledger,
+                    web_search=args.web_search,
+                    max_searches=args.max_searches,
+                    reserve=args.clarify_reserve,
+                )
             )
-        )
+        except BudgetExceeded as e:
+            print(f"\n预算用尽，只审查了前 {probe_n} 个候选: {e}", file=sys.stderr)
     elapsed = time.monotonic() - t0
 
     total_risks = 0
@@ -210,11 +258,12 @@ async def main() -> int:
         f"合计 {total_risks} 条风险 | blocker {blockers} | 需追问 {needs_input} | "
         f"耗时 {elapsed:.1f}s"
     )
-    costs = [s["total_cost_usd"] for s in stats if "total_cost_usd" in s]
-    if costs:
-        per = sum(costs) / len(costs)
+    covered = candidates_covered(stats)
+    spent = cost_of(stats)
+    if covered:
+        per = spent / covered
         print(
-            f"成本: 本次 ${sum(costs):.4f} / {len(costs)} 个候选 = "
+            f"成本: 本次 ${spent:.4f} / {covered} 个候选 = "
             f"${per:.4f} 每候选 → 全量 {len(ranked)} 个约 ${per * len(ranked):.2f}"
         )
     turns = [s["num_turns"] for s in stats if "num_turns" in s]
@@ -231,9 +280,10 @@ async def main() -> int:
     if not args.interactive:
         print(f"预设画像: {json.dumps(PERSONA, ensure_ascii=False)}")
 
+    print(f"进入澄清前已花费 ${ledger.spent:.4f} / ${ledger.cap:.2f}")
     t0 = time.monotonic()
     updates, trip_ctx = await clarify(
-        risks_by_key, build_answer_fn(args.interactive)
+        risks_by_key, build_answer_fn(args.interactive), ledger=ledger
     )
     print(f"\n澄清结束，耗时 {time.monotonic() - t0:.1f}s")
     print(f"\n收集到的用户侧信息 (TripContext):")
@@ -258,6 +308,11 @@ async def main() -> int:
         r for risks in risks_by_key.values() for r in risks if r.needs_user_input
     ]
     print(f"\n剩余未知项 {len(unresolved)} 条（诚实度指标的分子）")
+
+    print(f"\n{'=' * 72}")
+    print(ledger.render())
+    verdict = "✓ 在预算内" if ledger.spent <= args.budget else "✗ 超预算"
+    print(f"{verdict}：本次查询全部路径共花费 ${ledger.spent:.4f}（上限 ${args.budget:.2f}）")
     return 0
 
 

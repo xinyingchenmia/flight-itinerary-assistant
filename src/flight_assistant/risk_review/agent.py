@@ -11,6 +11,7 @@ from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions, query
 
+from flight_assistant.budget import BudgetLedger
 from flight_assistant.models import FlightPriceComparison, Risk, TripContext
 from flight_assistant.risk_review import tools as risk_tools
 
@@ -202,34 +203,70 @@ def build_context(
 
 _NO_SOURCES_NOTE = """
 
-## 本次运行没有外部数据源
+## 本次运行没有专用数据源
 
-以下能力当前没有可查的数据源：{missing}。
+以下能力没有专用数据源：{missing}。
 
-不要尝试调用工具（没有注册任何工具）。凡是需要这些数据才能下结论的，
-直接标 needs_user_input=true，并在 evidence 里写明缺的是哪一项。
-你依然可以引用制度性的稳定规则（如美国首个入境口岸必须提取行李重新
-托运），只是不要编造具体的官方 MCT 数值、末班车时刻或签证条款。
+不要编造官方 MCT 数值、末班车时刻或签证条款。需要这些数据才能下结论的，
+标 needs_user_input=true 并写明缺哪一项。制度性的稳定规则（如某些国家
+首个入境口岸必须提取行李重新托运）可以直接引用。
+"""
+
+_WEB_SEARCH_NOTE = """
+
+## 你可以联网查证
+
+有 WebSearch 工具。**这是你查任意国家/机场/城市信息的手段**——不要因为
+没有专用数据库就放弃，也不要只对熟悉的国家下结论。
+
+什么时候该查（判断标准：查到了会改变结论吗）：
+- 不确定某国转机是否必须入境、是否需要过境签 → 查
+- 需要某机场的官方最小衔接时间（尤其换航站楼/跨航司）→ 查
+- 需要某城市机场到市区的末班车时刻 → 查
+- 已经确知的稳定规则、或衔接时间明显充裕到无论如何都够 → 不用查
+
+查证要求：
+- 优先航司官网、机场官网、政府移民局这类一手来源
+- evidence 里写明数字来自哪里（如"FRA 官网列明国际转国际 MCT 45 分钟"）
+- **查不到或来源冲突就标 needs_user_input=true**，不要拿搜索结果里
+  不确定的说法当结论
+- 一次审查里控制搜索次数，只查会改变结论的那几项
+
+## 搜索预算
+
+本次最多做 {max_searches} 次搜索。不够就优先查影响最大的那几项，
+其余标 needs_user_input。
 """
 
 
-def _system_prompt() -> str:
+def _system_prompt(web_search: bool = False, max_searches: int = 6) -> str:
+    prompt = SYSTEM_PROMPT
     missing = risk_tools.missing_sources()
-    if not missing:
-        return SYSTEM_PROMPT
-    return SYSTEM_PROMPT + _NO_SOURCES_NOTE.format(missing="、".join(missing))
+    if missing:
+        prompt += _NO_SOURCES_NOTE.format(missing="、".join(missing))
+    if web_search:
+        prompt += _WEB_SEARCH_NOTE.format(max_searches=max_searches)
+    return prompt
 
 
 def build_options(
-    schema: dict | None = None, model: str | None = None
+    schema: dict | None = None,
+    model: str | None = None,
+    web_search: bool = False,
+    max_searches: int = 6,
 ) -> ClaudeAgentOptions:
     """组装 agent 配置。
 
-    工具只在真正有数据源时才注册——注册一堆必然返回 no_data 的工具会让
-    agent 白跑 5 轮往返（实测平均 6.5 轮，是主要成本来源）。
+    专用工具只在真正有数据源时才注册——注册一堆必然返回 no_data 的工具会
+    让 agent 白跑 5 轮往返（实测平均 6.5 轮，是主要成本来源）。
+
+    web_search=True 时给它联网检索能力。这是让"自己找信息"成真的关键：
+    不需要预先枚举国家或机场，它想查哪个查哪个。代价是 token 和轮次，
+    所以 prompt 里给了搜索次数上限，外层还有 BudgetLedger 兜底。
     """
+    allowed: list[str] = []
     kwargs: dict[str, Any] = {
-        "system_prompt": _system_prompt(),
+        "system_prompt": _system_prompt(web_search, max_searches),
         "output_format": {
             "type": "json_schema",
             "schema": schema or _RISK_SCHEMA,
@@ -238,7 +275,11 @@ def build_options(
     server = risk_tools.build_server()
     if server is not None:
         kwargs["mcp_servers"] = {"risk_tools": server}
-        kwargs["allowed_tools"] = risk_tools.allowed_tools()
+        allowed += risk_tools.allowed_tools()
+    if web_search:
+        allowed += ["WebSearch", "WebFetch"]
+    if allowed:
+        kwargs["allowed_tools"] = allowed
     if model:
         kwargs["model"] = model
     return ClaudeAgentOptions(**kwargs)
@@ -311,6 +352,10 @@ async def review_batch(
     stats: list[dict] | None = None,
     trip_context: TripContext | None = None,
     model: str | None = None,
+    ledger: BudgetLedger | None = None,
+    web_search: bool = False,
+    max_searches: int = 6,
+    reserve: float = 0.0,
 ) -> dict[str, list[Risk]]:
     """一次调用审查一批候选。
 
@@ -321,6 +366,11 @@ async def review_batch(
     """
     if not candidates:
         return {}
+
+    if ledger is not None:
+        ledger.guard(
+            f"风险审查({len(candidates)} 个候选)", reserve=reserve, kind="review"
+        )
 
     payload = [
         {"candidate_id": i, **build_context(c, trip_context)}
@@ -337,7 +387,8 @@ async def review_batch(
     raw: str | None = None
     meta: dict = {"batch_size": len(candidates)}
     async for message in query(
-        prompt=prompt, options=build_options(_BATCH_SCHEMA, model)
+        prompt=prompt,
+        options=build_options(_BATCH_SCHEMA, model, web_search, max_searches),
     ):
         result = getattr(message, "result", None)
         if result is not None:
@@ -353,6 +404,8 @@ async def review_batch(
 
     if stats is not None:
         stats.append(meta)
+    if ledger is not None:
+        ledger.record_from_meta(f"风险审查({len(candidates)} 个)", meta, kind="review")
     if raw is None:
         raise RuntimeError("批量风险审查未返回结果")
 
@@ -375,6 +428,10 @@ async def review_all(
     trip_context: TripContext | None = None,
     batch_size: int = 8,
     model: str | None = None,
+    ledger: BudgetLedger | None = None,
+    web_search: bool = False,
+    max_searches: int = 6,
+    reserve: float = 0.0,
 ) -> dict[str, list[Risk]]:
     """审查多个候选：分批 + 批间并发。
 
@@ -397,11 +454,31 @@ async def review_all(
         candidates[i : i + batch_size]
         for i in range(0, len(candidates), batch_size)
     ]
+
+    # 有账本时先整体检查一次：一次性发起 N 个并发批次会绕过逐次 guard
+    # （并发调用在各自 record 之前就都发出去了），所以按批次数预判。
+    if ledger is not None:
+        ledger.guard(
+            f"风险审查({len(batches)} 个批次)",
+            expected_calls=len(batches),
+            reserve=reserve,
+            kind="review",
+        )
+
     sem = asyncio.Semaphore(concurrency)
 
     async def run_batch(batch: list[FlightPriceComparison]) -> dict[str, list[Risk]]:
         async with sem:
-            return await review_batch(batch, stats, trip_context, model)
+            return await review_batch(
+                batch,
+                stats,
+                trip_context,
+                model,
+                ledger,
+                web_search,
+                max_searches,
+                reserve,
+            )
 
     merged: dict[str, list[Risk]] = {}
     for part in await asyncio.gather(*(run_batch(b) for b in batches)):

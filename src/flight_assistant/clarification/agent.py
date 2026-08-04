@@ -13,6 +13,7 @@ from collections.abc import Awaitable, Callable
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
+from flight_assistant.budget import BudgetExceeded, BudgetLedger
 from flight_assistant.clarification import tools as clarify_tools
 from flight_assistant.clarification.tools import UpdateCollector
 from flight_assistant.models import Risk, TripContext
@@ -67,10 +68,16 @@ async def clarify(
     answer_fn: AnswerFn,
     max_turns: int = 8,
     trip_context: TripContext | None = None,
+    ledger: BudgetLedger | None = None,
 ) -> tuple[list[FieldUpdate], TripContext]:
     """跑澄清对话，返回 (字段更新列表, 更新后的 TripContext)。
 
     max_turns 只是防跑飞的上限，正常情况下由 agent 自己判断问完即止。
+
+    ledger 不为 None 时，**每一轮**对话前都检查预算。澄清对话是多轮的，
+    每轮都花钱——之前这条路径完全没有预算约束，所谓"每次查询不超过 X"
+    是假的。预算用尽时不抛异常，而是带着已收集到的答案正常返回：中途
+    停止追问仍然是有效结果，剩下的项留在 unresolved 里。
     """
     pending = _pending(risks_by_key)
     if not pending:
@@ -84,7 +91,14 @@ async def clarify(
             + json.dumps(pending, ensure_ascii=False, indent=2)
         )
 
-        for _ in range(max_turns):
+        for turn in range(max_turns):
+            if ledger is not None:
+                try:
+                    ledger.guard(f"澄清对话第 {turn + 1} 轮", kind="clarify")
+                except BudgetExceeded:
+                    # 预算用尽就停止追问，不是报错——已经问到的答案有效。
+                    break
+
             reply = ""
             errored = False
             async for message in client.receive_response():
@@ -99,6 +113,16 @@ async def clarify(
                         getattr(message, "subtype", "success") != "success"
                     ):
                         errored = True
+                    if ledger is not None:
+                        ledger.record_from_meta(
+                            f"澄清第 {turn + 1} 轮",
+                            {
+                                "total_cost_usd": getattr(
+                                    message, "total_cost_usd", None
+                                )
+                            },
+                            kind="clarify",
+                        )
 
             if errored:
                 raise RuntimeError(f"澄清对话中断（API 层错误）: {reply}")

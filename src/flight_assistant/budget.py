@@ -48,7 +48,11 @@ class BudgetLedger:
     cap: float
     # 给在途调用留的余量比例。单次调用的成本要等响应才知道，所以不能
     # 花到 cap 才停——那样最后一次调用必然超支。
-    reserve_ratio: float = 0.25
+    #
+    # 0.12 而不是 0.25：实测 0.25 时，审查花掉 $0.322/$0.50 后，澄清第一轮
+    # 花 $0.15 使累计到 $0.473 > 软上限 $0.375，于是第二轮被掐——答案已经
+    # 发出去但 agent 没机会落盘，闭环断在最后一步。余量要够一轮澄清用。
+    reserve_ratio: float = 0.12
     calls: list[CallRecord] = field(default_factory=list)
 
     @property

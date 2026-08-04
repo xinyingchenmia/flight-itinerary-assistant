@@ -186,13 +186,32 @@ def test_stage_costs_do_not_cross_contaminate():
 
 def test_clarify_turns_bounded_by_own_history():
     """澄清阶段自己的历史照样要起约束作用。"""
-    led = BudgetLedger(cap=0.5)
+    led = BudgetLedger(cap=0.5)  # 默认 reserve_ratio 0.12 → 软上限 0.44
     led.record("风险审查", 0.30, kind="review")
     for i in range(2):
         led.guard(f"澄清第 {i + 1} 轮", kind="clarify")
         led.record(f"澄清第 {i + 1} 轮", 0.05, kind="clarify")
 
     assert led.spent == pytest.approx(0.40)
-    # 0.40 已超软上限 0.375，即使澄清单轮很便宜也该停
+    # 还能再问一轮（0.40 < 软上限 0.44，预计 0.45 未超总上限 0.50）
+    led.guard("澄清第 3 轮", kind="clarify")
+    # 但连问三轮预计到 0.55，超总上限，该拦
     with pytest.raises(BudgetExceeded):
-        led.guard("澄清第 3 轮", kind="clarify")
+        led.guard("还要问三轮", expected_calls=3, kind="clarify")
+
+
+def test_reserve_ratio_leaves_room_for_one_clarify_turn():
+    """实测教训：reserve_ratio=0.25 时软上限 $0.375，审查花 $0.322 后澄清
+    第一轮花 $0.15 就到 $0.473，第二轮直接被掐——答案已发出但 agent 没
+    机会落盘，闭环断在最后一步。余量必须够一轮澄清用。
+    """
+    led = BudgetLedger(cap=0.5)
+    assert led.soft_cap == pytest.approx(0.44)
+
+    led.record("风险审查(4 个)", 0.322, candidates=4, kind="review")
+    led.guard("澄清第 1 轮", kind="clarify")
+    led.record("澄清第 1 轮", 0.08, kind="clarify")
+
+    # 关键：第一轮之后还能再来一轮，让 agent 有机会把答案落盘
+    led.guard("澄清第 2 轮", kind="clarify")
+    assert led.spent == pytest.approx(0.402)

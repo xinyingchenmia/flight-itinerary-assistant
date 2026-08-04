@@ -138,6 +138,34 @@ _RISK_SCHEMA = {
 }
 
 
+def _explain_api_error(stage: str, message: str) -> str:
+    """给 API 层错误补上可操作的排查方向。
+
+    裸报「403 Request not allowed」时用户无从下手，而这类错误的原因高度
+    集中在几种环境问题上。
+    """
+    hint = ""
+    low = message.lower()
+    if "403" in message or "authenticate" in low or "not allowed" in low:
+        hint = (
+            "\n排查方向（按可能性排序）：\n"
+            "  1. shell 里有失效的 ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / "
+            "ANTHROPIC_BASE_URL。环境变量优先于 claude CLI 的登录态，"
+            "旧 key 会直接 403。\n"
+            "     检查: echo ${#ANTHROPIC_API_KEY} ${#ANTHROPIC_AUTH_TOKEN} "
+            "$ANTHROPIC_BASE_URL\n"
+            "     临时绕开: env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN "
+            "-u ANTHROPIC_BASE_URL <原命令>\n"
+            "  2. claude CLI 登录态过期，需要重新登录\n"
+            "  3. 指定的模型当前账号无权访问（本次 --review-model / --model）"
+        )
+    elif "credit balance" in low or "quota" in low:
+        hint = "\n余额不足。到 console.anthropic.com/settings/billing 充值。"
+    elif "rate limit" in low or "429" in message:
+        hint = "\n触发速率限制。降低 --batch-size 的并发，或稍后重试。"
+    return f"{stage}失败（API 层错误）: {message}{hint}"
+
+
 def build_connections(it) -> list[dict[str, Any]]:
     """各中转点的衔接情况。确定性计算，不让 agent 自己减时刻。
 
@@ -386,6 +414,10 @@ async def review_batch(
 
     raw: str | None = None
     meta: dict = {"batch_size": len(candidates)}
+    # 在 async for 内部抛异常会让异步生成器无法正常关闭，真正的错误会被
+    # "aclose(): asynchronous generator is already running" 这个二次异常
+    # 盖住。所以先记下来，等循环正常结束后再抛。
+    api_error: str | None = None
     async for message in query(
         prompt=prompt,
         options=build_options(_BATCH_SCHEMA, model, web_search, max_searches),
@@ -395,7 +427,8 @@ async def review_batch(
             if getattr(message, "is_error", False) or (
                 getattr(message, "subtype", "success") != "success"
             ):
-                raise RuntimeError(f"风险审查失败（API 层错误）: {result}")
+                api_error = str(result)
+                continue
             raw = result
             for attr in ("total_cost_usd", "duration_ms", "num_turns"):
                 value = getattr(message, attr, None)
@@ -406,6 +439,9 @@ async def review_batch(
         stats.append(meta)
     if ledger is not None:
         ledger.record_from_meta(f"风险审查({len(candidates)} 个)", meta, kind="review")
+
+    if api_error is not None:
+        raise RuntimeError(_explain_api_error("风险审查", api_error))
     if raw is None:
         raise RuntimeError("批量风险审查未返回结果")
 

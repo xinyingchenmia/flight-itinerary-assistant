@@ -35,6 +35,8 @@ SYSTEM_PROMPT = """你负责就机票行程里的信息缺口追问用户。
   就把它当作无法确定，记进剩余未知项，然后继续下一个问题或结束。
 - 工具拒绝了某个字段路径，说明该信息在当前数据模型里没有落点。不要换个
   措辞重问同一件事——直接在结束语里说明这一项无法写回。
+- **拿到答案后第一件事就是调工具落盘**，不要先解释、不要先问下一个问题。
+  预算可能在任何一轮耗尽，没落盘的答案等于白问。
 - 判断没有更多高价值问题时，回复一行 DONE 并列出剩余的未知项，
   结束追问。
 """
@@ -63,6 +65,45 @@ def _pending(risks_by_key: dict[str, list[Risk]]) -> dict[str, list[dict]]:
     return out
 
 
+def _compact_pending(risks_by_key: dict[str, list[Risk]]) -> list[dict]:
+    """把待澄清项压缩成按风险类型聚合的紧凑清单。
+
+    为什么要压：实测一轮澄清对话花了 $0.1511，因为每轮都把 11 条风险的
+    完整 evidence（每条 150 字）全塞进上下文。而 agent 决定"该问什么"只
+    需要知道：有哪些类型的缺口、各影响几个候选、各缺哪个字段。完整
+    evidence 是给用户看的，不是给它决策用的。
+
+    同一类型的风险在多个候选上重复出现是常态（4 个候选全都缺国籍），
+    聚合后一条就够，agent 也更容易看出"问一次能解决 4 个候选"。
+    """
+    by_kind: dict[str, dict] = {}
+    for key, risks in risks_by_key.items():
+        for r in risks:
+            if not r.needs_user_input:
+                continue
+            slot = by_kind.setdefault(
+                r.kind,
+                {
+                    "kind": r.kind,
+                    "severity": r.severity,
+                    "affected_candidates": [],
+                    "sample_evidence": r.evidence[:120],
+                },
+            )
+            slot["affected_candidates"].append(key[:28])
+            # 多个候选里取最严重的那个等级
+            order = {"blocker": 0, "major": 1, "minor": 2}
+            if order[r.severity] < order[slot["severity"]]:
+                slot["severity"] = r.severity
+    for slot in by_kind.values():
+        slot["affected_count"] = len(slot["affected_candidates"])
+        slot.pop("affected_candidates")
+    return sorted(
+        by_kind.values(),
+        key=lambda s: ({"blocker": 0, "major": 1, "minor": 2}[s["severity"]], -s["affected_count"]),
+    )
+
+
 async def clarify(
     risks_by_key: dict[str, list[Risk]],
     answer_fn: AnswerFn,
@@ -86,19 +127,20 @@ async def clarify(
     collector = UpdateCollector(trip_context)
     async with ClaudeSDKClient(options=build_options(collector)) as client:
         await client.query(
-            "以下是需要用户澄清的风险项。挑出真正会改变排序的那些，"
-            "一次问一个：\n"
-            + json.dumps(pending, ensure_ascii=False, indent=2)
+            "以下是需要用户澄清的信息缺口，已按风险类型聚合"
+            "（affected_count = 影响几个候选）。挑出真正会改变排序的那些，"
+            "一次问一个。当前 trip_context:\n"
+            + json.dumps(
+                (trip_context or TripContext()).model_dump(mode="json"),
+                ensure_ascii=False,
+            )
+            + "\n\n缺口清单:\n"
+            + json.dumps(
+                _compact_pending(risks_by_key), ensure_ascii=False, indent=1
+            )
         )
 
         for turn in range(max_turns):
-            if ledger is not None:
-                try:
-                    ledger.guard(f"澄清对话第 {turn + 1} 轮", kind="clarify")
-                except BudgetExceeded:
-                    # 预算用尽就停止追问，不是报错——已经问到的答案有效。
-                    break
-
             reply = ""
             errored = False
             async for message in client.receive_response():
@@ -129,6 +171,21 @@ async def clarify(
 
             if not reply or DONE_MARKER in reply:
                 break
+
+            # 预算检查放在「发答案之前」，不是循环开头。
+            #
+            # 实测 bug：检查放开头时，最后一轮总是「发出答案 → 下一轮开头
+            # 发现预算不够 → break」，agent 从来没机会处理那个答案，
+            # 落盘动作永远丢在最后一步。nationality 写进去了但
+            # destination_after_arrival 没有，就是这么丢的。
+            #
+            # 现在的语义：付不起处理这个答案的钱，就干脆不问下去——
+            # 该项留作未知，而不是问了却不让它落盘。
+            if ledger is not None:
+                try:
+                    ledger.guard(f"澄清第 {turn + 2} 轮（处理答案）", kind="clarify")
+                except BudgetExceeded:
+                    break
 
             answer = await answer_fn(reply)
             await client.query(answer)

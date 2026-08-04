@@ -14,6 +14,7 @@
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -32,8 +33,16 @@ FETCHERS = {
     "qunar": QunarFetcher,
 }
 
-# 用户自己的 Chrome profile 目录。复用已登录会话，不新建账号。
-DEFAULT_PROFILE = Path.home() / "Library/Application Support/Google/Chrome"
+# 本工具专用的 Chrome profile 目录。
+#
+# 为什么不直接用日常的 ~/Library/Application Support/Google/Chrome：
+# Chrome 运行时会用 ProcessSingleton 锁住 profile，launch_persistent_context
+# 起不来，等于每次取数都得先退出浏览器。专用目录避开这个冲突，也让取数
+# 和日常浏览互不干扰。
+#
+# 首次使用需要你自己在弹出的窗口里登录一次携程（脚本不代填任何账号密码、
+# 不存储凭据）。登录态会留在这个目录里，后续运行直接复用。
+DEFAULT_PROFILE = Path.home() / ".flight-assistant-chrome"
 
 
 def main() -> int:
@@ -52,12 +61,36 @@ def main() -> int:
     ap.add_argument("--out", default="fetched.json", help="取数结果输出路径")
     args = ap.parse_args()
 
+    profile = Path(args.profile_dir).expanduser()
+    # 只有指向日常 Chrome 的 user data dir 时才需要担心 profile 被锁：
+    # Chrome 运行时用 ProcessSingleton 锁住该目录，persistent context 起不来。
+    # 专用目录（默认）不受影响，可以和日常 Chrome 同时跑。
+    if "Google/Chrome" in str(profile) and (
+        subprocess.run(["pgrep", "-x", "Google Chrome"], capture_output=True).returncode
+        == 0
+    ):
+        print(
+            f"{profile} 是日常 Chrome 的 profile，而 Chrome 正在运行（目录被锁）。\n"
+            "要么完全退出 Chrome（Cmd+Q），要么去掉 --profile-dir 用专用 profile。",
+            file=sys.stderr,
+        )
+        return 1
+
+    first_run = not profile.exists()
+    if first_run:
+        print(
+            f"首次运行，将新建专用 profile: {profile}\n"
+            "浏览器打开后如果被要求登录或出现验证码，请你自己在窗口里处理"
+            "（脚本不代填账号密码、不尝试绕过验证码）。\n",
+            file=sys.stderr,
+        )
+
     missing: list[str] = []
     results = []
 
     with sync_playwright() as p:
         ctx = p.chromium.launch_persistent_context(
-            args.profile_dir,
+            str(profile),
             headless=False,  # 验证码人工处理，脚本不做任何绕过尝试
             channel="chrome",
         )

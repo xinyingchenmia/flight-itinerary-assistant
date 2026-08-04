@@ -13,6 +13,7 @@
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -23,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from flight_assistant.fetchers.ctrip import CtripFetcher  # noqa: E402
 from flight_assistant.fetchers.feizhu import FeizhuFetcher  # noqa: E402
 from flight_assistant.fetchers.qunar import QunarFetcher  # noqa: E402
+from flight_assistant.matching import build_itinerary_key, group_and_compare  # noqa: E402
 
 FETCHERS = {
     "ctrip": CtripFetcher,
@@ -47,6 +49,7 @@ def main() -> int:
         help="逐个平台核对选择器，不要四个同时开工",
     )
     ap.add_argument("--profile-dir", default=str(DEFAULT_PROFILE))
+    ap.add_argument("--out", default="fetched.json", help="取数结果输出路径")
     args = ap.parse_args()
 
     missing: list[str] = []
@@ -64,22 +67,56 @@ def main() -> int:
             fetcher = FETCHERS[name]()
             try:
                 # 单次尝试，不重试——重试到限流没有意义且更容易触发风控
-                offers = fetcher.fetch_offers(args.origin, args.dest, args.date, page)
+                fetched = fetcher.fetch_offers(args.origin, args.dest, args.date, page)
             except Exception as e:
                 print(f"[{name}] 取数失败，标记该平台缺失: {e}", file=sys.stderr)
                 missing.append(name)
                 continue
-            print(f"[{name}] 取到 {len(offers)} 条报价")
-            results.extend(offers)
+            n_itin = len({build_itinerary_key(it) for it, _ in fetched})
+            print(f"[{name}] 取到 {len(fetched)} 条报价，覆盖 {n_itin} 个行程")
+            results.extend(fetched)
 
         ctx.close()
 
     if missing:
         print(f"缺失平台: {', '.join(missing)}", file=sys.stderr)
 
-    # 官网取数（OfficialSiteFetcher）依赖前三个平台先跑出候选，取出候选里
-    # 出现的承运商集合后再逐个路由查询。等上面三个平台的选择器核对完、
-    # 能真正返回候选之后再接这一步。
+    if not results:
+        print("没有取到任何数据。", file=sys.stderr)
+        return 1
+
+    # 跨平台匹配 + 比价（确定性代码）
+    comparisons = group_and_compare(results)
+    print(f"\n合并后 {len(comparisons)} 个行程：")
+    for c in sorted(comparisons, key=lambda x: min(o.price for o in x.offers))[:10]:
+        route = "→".join(
+            [c.itinerary.segments[0].dep_airport]
+            + [s.arr_airport for s in c.itinerary.segments]
+        )
+        cheapest = min(o.price for o in c.offers)
+        print(
+            f"  ¥{cheapest:>7} {route:22s} "
+            f"{c.itinerary.total_duration_min // 60}h{c.itinerary.total_duration_min % 60:02d}m "
+            f"转{c.itinerary.stop_count}次  {len(c.offers)} 个报价"
+        )
+
+    out = Path(args.out)
+    out.write_text(
+        json.dumps(
+            [
+                {"itinerary": it.model_dump(mode="json"), "offer": o.model_dump(mode="json")}
+                for it, o in results
+            ],
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    print(f"\n已写入 {out}（供 pipeline / 评测集使用）")
+
+    # 官网取数（OfficialSiteFetcher）依赖前三个平台先跑出候选：从上面的
+    # 候选里取出实际出现的承运商集合，再逐个路由到对应航司官网核价。
+    carriers = sorted({s.carrier for it, _ in results for s in it.segments})
+    print(f"候选里出现的承运商（官网核价的输入）: {', '.join(carriers)}")
     return 0
 
 

@@ -1,0 +1,204 @@
+{
+  "status": "0",
+  "msg": "success",
+  "data": {
+    "flightItineraryList": [
+      {
+        "itineraryId": "LH733_1790524200000,LH9152_1790556600000",
+        "flightSegments": [
+          {
+            "segmentNo": 1,
+            "duration": 1450,
+            "transferCount": 1,
+            "stopCount": 0,
+            "flightList": [
+              {
+                "flightNo": "LH733",
+                "sequenceNo": 1,
+                "marketAirlineCode": "LH",
+                "marketAirlineName": "汉莎航空",
+                "marketAlliance": "星空联盟",
+                "departureCountryCode": "CN",
+                "departureAirportCode": "PVG",
+                "departureTerminal": "T2",
+                "arrivalCountryCode": "DE",
+                "arrivalAirportCode": "FRA",
+                "arrivalTerminal": "T1",
+                "duration": 820,
+                "transferDuration": 80,
+                "departureDateTime": "2026-09-27 23:50:00",
+                "arrivalDateTime": "2026-09-28 07:30:00",
+                "stopCount": 0
+              },
+              {
+                "flightNo": "LH9152",
+                "sequenceNo": 2,
+                "marketAirlineCode": "LH",
+                "marketAirlineName": "汉莎航空",
+                "marketAlliance": "星空联盟",
+                "operateAirlineCode": "UA",
+                "operateAirlineName": "美国联合航空",
+                "operateFlightNo": "UA945",
+                "departureCountryCode": "DE",
+                "departureAirportCode": "FRA",
+                "departureTerminal": "T1",
+                "arrivalCountryCode": "US",
+                "arrivalAirportCode": "ORD",
+                "arrivalTerminal": "T5",
+                "duration": 550,
+                "transferDuration": 0,
+                "departureDateTime": "2026-09-28 08:50:00",
+                "arrivalDateTime": "2026-09-28 11:00:00",
+                "stopCount": 0
+              }
+            ]
+          }
+        ],
+        "priceList": [
+          {
+            "adultPrice": 8434,
+            "adultTax": 3590,
+            "penalty": {
+              "penaltyCriteria": "(退改原文已截断，仅保留字段存在性)"
+            }
+          },
+          {
+            "adultPrice": 8434,
+            "adultTax": 3590,
+            "penalty": {
+              "penaltyCriteria": "(退改原文已截断，仅保留字段存在性)"
+            }
+          }
+        ]
+      },
+      {
+        "itineraryId": "TK027_1790519100000,TK185_1790548200000",
+        "flightSegments": [
+          {
+            "segmentNo": 1,
+            "duration": 1455,
+            "transferCount": 1,
+            "stopCount": 0,
+            "flightList": [
+              {
+                "flightNo": "TK027",
+                "sequenceNo": 1,
+                "marketAirlineCode": "TK",
+                "marketAirlineName": "土耳其航空",
+                "marketAlliance": "星空联盟",
+                "departureCountryCode": "CN",
+                "departureAirportCode": "PVG",
+                "departureTerminal": "T2",
+                "arrivalCountryCode": "TR",
+                "arrivalAirportCode": "IST",
+                "duration": 720,
+                "transferDuration": 65,
+                "departureDateTime": "2026-09-27 22:25:00",
+                "arrivalDateTime": "2026-09-28 05:25:00",
+                "stopCount": 0
+              },
+              {
+                "flightNo": "TK185",
+                "sequenceNo": 2,
+                "marketAirlineCode": "TK",
+                "marketAirlineName": "土耳其航空",
+                "marketAlliance": "星空联盟",
+                "departureCountryCode": "TR",
+                "departureAirportCode": "IST",
+                "arrivalCountryCode": "US",
+                "arrivalAirportCode": "ORD",
+                "arrivalTerminal": "T5",
+                "duration": 670,
+                "transferDuration": 0,
+                "departureDateTime": "2026-09-28 06:30:00",
+                "arrivalDateTime": "2026-09-28 09:40:00",
+                "stopCount": 0
+              }
+            ]
+          }
+        ],
+        "priceList": [
+          {
+            "adultPrice": 6499,
+            "adultTax": 2994,
+            "penalty": {
+              "penaltyCriteria": "(退改原文已截断，仅保留字段存在性)"
+            }
+          },
+          {
+            "adultPrice": 5764,
+            "adultTax": 2994,
+            "penalty": {
+              "penaltyCriteria": "(退改原文已截断，仅保留字段存在性)"
+            }
+          }
+        ]
+      },
+      {
+        "itineraryId": "UA199_1790511000000,UA1962_1790523300000",
+        "flightSegments": [
+          {
+            "segmentNo": 1,
+            "duration": 1355,
+            "transferCount": 1,
+            "stopCount": 0,
+            "flightList": [
+              {
+                "flightNo": "UA199",
+                "sequenceNo": 1,
+                "marketAirlineCode": "UA",
+                "marketAirlineName": "美国联合航空",
+                "marketAlliance": "星空联盟",
+                "departureCountryCode": "CN",
+                "departureAirportCode": "PVG",
+                "departureTerminal": "T2",
+                "arrivalCountryCode": "US",
+                "arrivalAirportCode": "LAX",
+                "arrivalTerminal": "T6",
+                "duration": 710,
+                "transferDuration": 395,
+                "departureDateTime": "2026-09-27 20:10:00",
+                "arrivalDateTime": "2026-09-27 17:00:00",
+                "stopCount": 0
+              },
+              {
+                "flightNo": "UA1962",
+                "sequenceNo": 2,
+                "marketAirlineCode": "UA",
+                "marketAirlineName": "美国联合航空",
+                "marketAlliance": "星空联盟",
+                "departureCountryCode": "US",
+                "departureAirportCode": "LAX",
+                "departureTerminal": "T7",
+                "arrivalCountryCode": "US",
+                "arrivalAirportCode": "ORD",
+                "arrivalTerminal": "T1",
+                "duration": 250,
+                "transferDuration": 0,
+                "departureDateTime": "2026-09-27 23:35:00",
+                "arrivalDateTime": "2026-09-28 05:45:00",
+                "stopCount": 0
+              }
+            ]
+          }
+        ],
+        "priceList": [
+          {
+            "adultPrice": 4492,
+            "adultTax": 2610,
+            "penalty": {
+              "penaltyCriteria": "(退改原文已截断，仅保留字段存在性)"
+            }
+          },
+          {
+            "adultPrice": 4492,
+            "adultTax": 2610,
+            "penalty": {
+              "penaltyCriteria": "(退改原文已截断，仅保留字段存在性)"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

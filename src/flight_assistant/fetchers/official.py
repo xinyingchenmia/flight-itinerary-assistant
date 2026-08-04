@@ -2,8 +2,8 @@ from typing import Literal, Protocol
 
 from playwright.sync_api import Page
 
-from flight_assistant.fetchers.base import PlatformFetcher
-from flight_assistant.models import PlatformOffer
+from flight_assistant.fetchers.base import FetchResult, PlatformFetcher
+from flight_assistant.models import Itinerary, PlatformOffer
 
 BlockedDecision = Literal["continue", "stop_and_flag"]
 
@@ -47,7 +47,7 @@ class SemanticExtractor(Protocol):
 
     def extract_offer(
         self, page: Page, origin: str, dest: str, date: str, carrier_code: str
-    ) -> PlatformOffer | None: ...
+    ) -> tuple[Itinerary, PlatformOffer] | None: ...
 
 
 class OfficialSiteFetcher(PlatformFetcher):
@@ -80,7 +80,7 @@ class OfficialSiteFetcher(PlatformFetcher):
         date: str,
         page: Page,
         carrier_code: str | None = None,
-    ) -> list[PlatformOffer]:
+    ) -> list[FetchResult]:
         if carrier_code is None:
             raise ValueError("OfficialSiteFetcher.fetch_offers 需要 carrier_code")
 
@@ -95,7 +95,7 @@ class OfficialSiteFetcher(PlatformFetcher):
 
     def _semantic_fallback(
         self, origin: str, dest: str, date: str, page: Page, carrier_code: str
-    ) -> list[PlatformOffer]:
+    ) -> list[FetchResult]:
         decision = check_blocked_state(page)
         if decision == "stop_and_flag":
             raise RuntimeError(

@@ -6,3 +6,5 @@ __pycache__/
 uv.lock.bak
 .env
 tests/eval/cases.jsonl
+scripts/sample_pull_response.json
+fetched.json

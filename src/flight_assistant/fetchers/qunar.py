@@ -1,7 +1,6 @@
 from playwright.sync_api import Page
 
-from flight_assistant.fetchers.base import PlatformFetcher
-from flight_assistant.models import PlatformOffer
+from flight_assistant.fetchers.base import FetchResult, PlatformFetcher
 
 # URL 模板来自需求文档，未做过人工核对的部分见下方 TODO。
 _LIST_URL = (
@@ -15,25 +14,15 @@ class QunarFetcher(PlatformFetcher):
 
     def fetch_offers(
         self, origin: str, dest: str, date: str, page: Page
-    ) -> list[PlatformOffer]:
+    ) -> list[FetchResult]:
         url = _LIST_URL.format(origin=origin, dest=dest, date=date)
         page.goto(url, wait_until="domcontentloaded")
 
-        # TODO(人工核对真实页面后填入): 结果列表的稳定选择器。
-        # 去哪儿的查询参数名（searchDepartureAirport 等）也待核对，
-        # 文档里只给了 URL 前缀，具体 query string 需要打开真实页面确认。
-        # 核对完选择器后，参考此形状组装返回值：
-        # return [
-        #     PlatformOffer(
-        #         platform=self.platform_name,
-        #         price=Decimal("..."),
-        #         currency="CNY",
-        #         fetched_at=datetime.now(timezone.utc),
-        #         booking_url=url,
-        #         fare_conditions_raw="...",
-        #         confidence="confirmed",
-        #     )
-        # ]
+        # TODO(待核对真实页面): 两件事都要核对——
+        #   1. 查询参数名（searchDepartureAirport 等只是文档里的猜测，
+        #      打开真实页面看地址栏被改写成什么）
+        #   2. 用 scripts/capture_pull.js 找它的航班数据 JSON 接口，
+        #      仿照 ctrip_parse.py 写 qunar_parse.py
         raise NotImplementedError(
-            "Qunar 选择器与查询参数待人工核对真实页面后填入 (see fetchers/qunar.py TODO)"
+            "Qunar 取数待核对：先确认 URL 参数名，再用 capture_pull.js 找数据接口"
         )

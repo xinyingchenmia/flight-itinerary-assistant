@@ -44,6 +44,7 @@ from flight_assistant.models import (  # noqa: E402
     TripContext,
 )
 from flight_assistant.recompute import apply_updates  # noqa: E402
+from flight_assistant.report import render as render_report  # noqa: E402
 from flight_assistant.risk_review.agent import review_all, review_batch  # noqa: E402
 from flight_assistant.screening import screen_all  # noqa: E402
 
@@ -276,7 +277,7 @@ async def main() -> int:
         action="store_true",
         help="给风险审查 agent 联网检索能力（任意国家/机场都能自己查，不限于预设列表）",
     )
-    ap.add_argument("--max-searches", type=int, default=4, help="每批次的搜索次数上限")
+    ap.add_argument("--max-searches", type=int, default=2, help="每批次的搜索次数上限（降到 2 大幅缩短时间，命中事实缓存时实际搜索更少）")
     ap.add_argument(
         "--risks-cache",
         default=None,
@@ -285,8 +286,8 @@ async def main() -> int:
     )
     ap.add_argument(
         "--review-model",
-        default=None,
-        help="风险审查用的模型。审查是成本大头，用便宜模型能腾出额度给澄清对话",
+        default="claude-haiku-4-5-20251001",
+        help="风险审查用的模型。默认 haiku（快且省钱）；改成 claude-sonnet-5 可提高召回率",
     )
     ap.add_argument(
         "--trip-context",
@@ -411,38 +412,9 @@ async def main() -> int:
             )
             print(f"风险审查结果已缓存到 {cache_path}")
 
-    total_risks = 0
-    total_ok = 0
-    blockers = 0
-    needs_input = 0
-    for i, c in enumerate(subject, 1):
-        risks, assurances, notes = risks_by_key[c.itinerary_key]
-        total_risks += len(risks)
-        total_ok += len(assurances)
-        blockers += sum(1 for r in risks if r.severity == "blocker")
-        needs_input += sum(1 for r in risks if r.needs_user_input)
-        segs = c.itinerary.segments
-        route = "→".join([segs[0].dep_airport] + [s.arr_airport for s in segs])
-        print(f"\n候选 {i} ({route}, ¥{min(o.price for o in c.offers)}):")
-        if not risks and not assurances and not notes:
-            print("  （无结论）")
-        for r in risks:
-            tag = " [需追问]" if r.needs_user_input else ""
-            print(f"  ● {r.kind}/{r.severity}{tag}")
-            print(f"    {r.evidence}")
-        for a in assurances:
-            print(f"  ✓ {a.statement}")
-            print(f"    依据: {a.evidence}")
-        for n in notes:
-            icon = {"good": "☺", "poor": "☹", "unknown": "?"}[n.verdict]
-            print(f"  {icon} [{n.preference}] {n.statement}")
-            print(f"    依据: {n.evidence}")
+    # 展示初轮审查结果（含所有已确认的好消息）
+    print(render_report(subject, risks_by_key, cost_usd=cost_of(stats), elapsed_s=elapsed))
 
-    print(f"\n{'-' * 72}")
-    print(
-        f"合计 {total_risks} 条风险 | blocker {blockers} | 需追问 {needs_input} | "
-        f"已确认没问题 {total_ok} 条 | 耗时 {elapsed:.1f}s"
-    )
     covered = candidates_covered(stats)
     spent = cost_of(stats)
     if covered:
@@ -513,19 +485,22 @@ async def main() -> int:
             _print_risk_diff(after, risks_before, risks_by_key)
 
     after_order = [c.itinerary_key for c in after]
-    print(f"\n排序是否改变: {'是' if before_order != after_order else '否'}")
+    if before_order != after_order:
+        print(f"\n排序已变化。")
 
-    # 步骤 9：剩余未知项
-    unresolved = [
-        r for rs, *_ in risks_by_key.values() for r in rs if r.needs_user_input
-    ]
+    # 步骤 9：最终推荐（含全部已确认信息，不只是风险）
     before_unresolved = sum(
         1 for rs, *_ in risks_before.values() for r in rs if r.needs_user_input
     )
-    print(
-        f"剩余未知项 {len(unresolved)} 条（澄清前 {before_unresolved} 条，"
-        f"解决了 {before_unresolved - len(unresolved)} 条）"
+    after_unresolved = sum(
+        1 for rs, *_ in risks_by_key.values() for r in rs if r.needs_user_input
     )
+    if before_unresolved != after_unresolved:
+        print(f"\n澄清解决了 {before_unresolved - after_unresolved} 个未知项。")
+
+    print(f"\n{'=' * 72}")
+    print("最终推荐")
+    print(render_report(after, risks_by_key))
 
     if cache is not None:
         cache.save()

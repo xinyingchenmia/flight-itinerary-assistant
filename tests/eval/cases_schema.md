@@ -55,3 +55,34 @@
 
 `tests/test_matching.py` 里已经有一个最小版本的单测覆盖这个场景，评测集
 里的样例是它的真实数据版本。
+
+## acceptable_kinds / accept_needs_user_input（实测加上的）
+
+`ground_truth_risks` 里每项可以带这两个字段：
+
+```json
+{
+  "kind": "entry_connection_tight",
+  "severity": "blocker",
+  "acceptable_kinds": ["entry_connection_tight", "mct_tight"],
+  "accept_needs_user_input": true
+}
+```
+
+**为什么需要**：同一个缺陷常有多种合理归类。60 分钟的 YVR 中转，报
+`entry_connection_tight`（须入境提取行李）或 `mct_tight`（单纯时间不够）
+都是对的——加拿大对中国护照有 China Transit Program，是否必须入境本身就
+有争议，但 60 分钟无论如何都不够。只认一种归类会把**评分方式的问题**算成
+agent 的失败：同时记一次漏报和一次误报。
+
+`accept_needs_user_input` 用于那些「本来就该说查不到」的项（如空侧过境
+24 小时免签因航司/航站楼而异）——标 `needs_user_input=true` 算合格。
+
+严重程度容忍一级：blocker vs major 的边界本身主观，差两级才算判断失误。
+
+## 评分只统计干净样本上的误报
+
+有缺陷的样本上多报几条相关风险不算误报——那可能是真实存在的其他问题。
+实测例子：所有样本的 trip_context 都设了「目的地市区 + 只坐公共交通」，
+于是深夜落地的候选会额外报 `arrival_no_ground_transit`，这是正确的推理
+而不是噪音。

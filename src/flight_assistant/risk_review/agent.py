@@ -63,6 +63,12 @@ SYSTEM_PROMPT = """你审查机票行程的风险，输出结构化的 Risk 列�
    取决于国籍和是否需要离开管制区。查工具，不要凭记忆。
    → kind = transit_visa_required / no_through_baggage
 
+   **`transit_visa_required` 只用于中转点**（有 ≥2 段航段、旅客要在
+   中途某地停留）。**直飞航班不存在中转，不要报 transit_visa_required**——
+   即使目的地国家本身需要入境签证，那也不是这个行程结构带来的风险，
+   任何一趟去那个国家的航班都一样，不是订票页面看不到的信息，不属于
+   你的审查范围，不要报。
+
 4. **拆票行程的连带风险**
    前段延误后段不保护、行李不直挂、需要自己重新值机。
    → kind = self_transfer_no_protection

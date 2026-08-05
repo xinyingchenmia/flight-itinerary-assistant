@@ -277,7 +277,14 @@ async def main() -> int:
         action="store_true",
         help="给风险审查 agent 联网检索能力（任意国家/机场都能自己查，不限于预设列表）",
     )
-    ap.add_argument("--max-searches", type=int, default=2, help="每批次的搜索次数上限（降到 2 大幅缩短时间，命中事实缓存时实际搜索更少）")
+    ap.add_argument(
+        "--max-searches",
+        type=int,
+        default=4,
+        help="每批次的搜索次数上限。砍这个值省钱但会漏报——实测降到 2 后"
+        "PEK/PKX 同城不同机场这种真实 blocker 直接漏掉了（100%→50% 召回）。"
+        "提速降本应该靠事实缓存命中，不是砍搜索预算",
+    )
     ap.add_argument(
         "--risks-cache",
         default=None,
@@ -286,8 +293,9 @@ async def main() -> int:
     )
     ap.add_argument(
         "--review-model",
-        default="claude-haiku-4-5-20251001",
-        help="风险审查用的模型。默认 haiku（快且省钱）；改成 claude-sonnet-5 可提高召回率",
+        default=None,
+        help="风险审查用的模型。默认用 CLI 默认模型（sonnet-5）。实测 haiku "
+        "召回率明显更差（case-007 PEK/PKX 同城不同机场漏报），不建议默认换",
     )
     ap.add_argument(
         "--trip-context",

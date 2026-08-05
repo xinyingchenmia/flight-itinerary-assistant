@@ -8,7 +8,7 @@
 真人交互模式用 --interactive。
 
 用法：
-    uv run python scripts/run_pipeline.py                      # 审查前 8 个候选
+    uv run python scripts/run_pipeline.py                      # 审查前 4 个候选
     uv run python scripts/run_pipeline.py --limit 47           # 全量
     uv run python scripts/run_pipeline.py --sort duration --max-stops 1
     uv run python scripts/run_pipeline.py --interactive        # 自己回答澄清问题
@@ -238,7 +238,14 @@ def _print_risk_diff(candidates, before: dict, after: dict) -> None:
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--fetched", default="fetched.json")
-    ap.add_argument("--limit", type=int, default=8, help="审查前 N 个候选")
+    ap.add_argument(
+        "--limit",
+        type=int,
+        default=4,
+        help="审查前 N 个候选（排序后取最优的 N 个）。上限定 4 是控制单次"
+        "查询的时间和成本——候选越多，风险审查和澄清对话要覆盖的信息越多，"
+        "越难落在 2 分钟/1 刀以内",
+    )
     ap.add_argument(
         "--sort",
         default="price",
@@ -262,7 +269,7 @@ async def main() -> int:
     ap.add_argument("--max-stops", type=int, default=None)
     ap.add_argument("--interactive", action="store_true")
     ap.add_argument(
-        "--batch-size", type=int, default=8, help="一次调用审查几个候选（越大越省）"
+        "--batch-size", type=int, default=4, help="一次调用审查几个候选（越大越省）"
     )
     ap.add_argument("--model", default=None, help="如 claude-sonnet-5，默认用 CLI 默认模型")
     ap.add_argument(

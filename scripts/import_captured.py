@@ -1,12 +1,12 @@
 """把浏览器里手动捕获的平台响应导入成 fetched.json。
 
 为什么需要这个脚本：
-    携程的 WhaleGuard 会拦截自动化控制的浏览器（实测 Playwright 驱动的
-    Chrome 直接返回 "whaleguard block"，页面连航班接口都不会请求）。
-    项目边界里写明不做任何绕过尝试，所以自动取数对携程不可用。
+    携程的 WhaleGuard、飞猪的验证码都会拦截自动化控制的浏览器（实测
+    Playwright 驱动的 Chrome 直接被拦，页面连航班接口都不会正常返回）。
+    项目边界里写明不做任何绕过尝试，所以自动取数对这两个平台都不可用。
 
     但你在自己日常的 Chrome 里正常浏览是可以的。流程变成：
-      1. 正常打开携程搜索页（你自己的浏览器，正常使用）
+      1. 正常打开搜索页（你自己的浏览器，正常使用）
       2. Console 里粘 scripts/capture_pull.js 装上响应拦截器
       3. 重新触发一次搜索，然后运行页面里的下载函数
       4. 跑本脚本，把 ~/Downloads 里的 JSON 导入成 fetched.json
@@ -21,6 +21,7 @@
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -28,14 +29,38 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from flight_assistant.fetchers.ctrip_parse import parse_batch_search  # noqa: E402
+from flight_assistant.fetchers.feizhu_parse import parse_poller_response  # noqa: E402
 from flight_assistant.matching import group_and_compare  # noqa: E402
 from flight_assistant.models import Itinerary, PlatformOffer  # noqa: E402
+
+_JSONP_RE = re.compile(r"^\s*\w+\((.*)\)\s*;?\s*$", re.DOTALL)
+
+
+def _load_json_or_jsonp(text: str) -> dict:
+    """飞猪的 poller 响应是 jsonpN(...) 包了一层，携程是纯 JSON——两种都试。"""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        m = _JSONP_RE.match(text)
+        if not m:
+            raise
+        return json.loads(m.group(1))
+
+
+def _parse_feizhu(payload: dict, fetched_at: datetime):
+    items, _delay = parse_poller_response(payload, fetched_at)
+    return items
+
 
 # 平台 → 识别函数 + 解析函数。加新平台时在这里注册，上层不用改。
 PARSERS = {
     "ctrip": (
         lambda d: bool(d.get("data", {}).get("flightItineraryList")),
         parse_batch_search,
+    ),
+    "feizhu": (
+        lambda d: "flightItems" in d.get("data", {}),
+        _parse_feizhu,
     ),
 }
 
@@ -46,9 +71,9 @@ def load_captures(paths: list[Path]) -> list[tuple[Itinerary, PlatformOffer]]:
 
     for path in paths:
         try:
-            payload = json.loads(path.read_text())
+            payload = _load_json_or_jsonp(path.read_text())
         except Exception as e:
-            print(f"  跳过 {path.name}: 不是合法 JSON ({e})", file=sys.stderr)
+            print(f"  跳过 {path.name}: 不是合法 JSON/JSONP ({e})", file=sys.stderr)
             continue
 
         matched = False
@@ -92,10 +117,13 @@ def main() -> int:
     if args.files:
         paths = [Path(f).expanduser() for f in args.files]
     else:
-        paths = sorted((Path.home() / "Downloads").glob("ctrip-*.json"))
+        downloads = Path.home() / "Downloads"
+        paths = sorted(
+            {p for prefix in PARSERS for p in downloads.glob(f"{prefix}-*.json")}
+        )
         if not paths:
             print(
-                "~/Downloads 里没找到 ctrip-*.json。\n"
+                f"~/Downloads 里没找到 {'/'.join(f'{p}-*.json' for p in PARSERS)}。\n"
                 "先按 scripts/capture_pull.js 顶部的说明在浏览器里捕获一份。",
                 file=sys.stderr,
             )

@@ -131,6 +131,16 @@ DFW:terminal_d_facility、ORD:ground_transit、HK:transit_visa_cn。用中文短
 
 ## 硬约束
 
+- **写给普通用户看的大白话，不是写给程序员看的调试日志**。evidence /
+  statement 这些用户会读到的文本里，禁止出现输入字段的原始名字（如
+  `trip_context`、`needs_user_input`、`connections`、`baggage_through_checked`
+  这种下划线命名）、禁止用只有开发者才懂的缩写（如 MCT——要说就说"最短
+  转机时间"，不要单独扔一个缩写不解释），抽象概念一律说人话。
+- **机场只写数据里给的三字码（如 ORD），不要自己翻译成中文城市名**。
+  输入数据里没有城市名字段，"ORD 是芝加哥"这种对应关系是你凭训练记忆
+  猜的，猜错了就是编造事实——实测已经出过"ORD 翻译成一个不存在的地名"
+  的真实事故。三字码是数据里明确给出、不会错的，直接用；用户自己知道
+  自己订的是去哪的票，不需要你帮着翻译城市名。
 - 每条 evidence 必须引用具体数字或具体规则。"衔接 95 分钟，而 ORD 是本
   行程在美国的首个入境口岸，需入境+提取行李+重新托运+二次安检" 是合格的；
   "转机时间可能偏紧" 不合格。
@@ -370,9 +380,20 @@ _WEB_SEARCH_NOTE = """
 
 查证要求：
 - 优先航司官网、机场官网、政府移民局这类一手来源
+- **一手来源真的查不到时，可以用旅客经验帖**（穷游/马蜂窝的实际转机
+  经历、FlyerTalk、Reddit r/travel 这类）当补充依据，不是只能在"一手
+  来源"和"needs_user_input"之间二选一——官方没公布数据不代表信息不存在，
+  很多机场的实际衔接情况只有走过的人才知道
+- 但用经验帖有两条硬要求：
+  1. evidence 里必须写清楚这是"旅客经验"而不是官方数据（如"据穷游
+     2025 年游记，XX 机场转机实测 xx 分钟够用"），不能让它看起来像
+     官方结论——用户要知道这个结论的可信度层级不一样
+  2. 只有一篇帖子、或者不同帖子说法互相矛盾时，仍然要标
+     needs_user_input=true；只有多篇独立经验帖说法一致时，才可以把
+     它当作有一定把握的依据（但依然要标注来源是经验帖）
 - evidence 里写明数字来自哪里（如"FRA 官网列明国际转国际 MCT 45 分钟"）
-- **查不到或来源冲突就标 needs_user_input=true**，不要拿搜索结果里
-  不确定的说法当结论
+- **一手来源和经验帖都查不到、或来源冲突就标 needs_user_input=true**，
+  不要拿搜索结果里不确定的说法当结论
 - 一次审查里控制搜索次数，只查会改变结论的那几项
 
 ## 搜索预算
@@ -554,24 +575,29 @@ async def review_batch(
     # "aclose(): asynchronous generator is already running" 这个二次异常
     # 盖住。所以先记下来，等循环正常结束后再抛。
     api_error: str | None = None
-    async for message in query(
-        prompt=prompt,
-        options=build_options(
-            _BATCH_SCHEMA, model, web_search, max_searches, cache
-        ),
-    ):
-        result = getattr(message, "result", None)
-        if result is not None:
-            if getattr(message, "is_error", False) or (
-                getattr(message, "subtype", "success") != "success"
-            ):
-                api_error = str(result)
-                continue
-            raw = result
-            for attr in ("total_cost_usd", "duration_ms", "num_turns"):
-                value = getattr(message, attr, None)
-                if value is not None:
-                    meta[attr] = value
+    try:
+        async for message in query(
+            prompt=prompt,
+            options=build_options(
+                _BATCH_SCHEMA, model, web_search, max_searches, cache
+            ),
+        ):
+            result = getattr(message, "result", None)
+            if result is not None:
+                if getattr(message, "is_error", False) or (
+                    getattr(message, "subtype", "success") != "success"
+                ):
+                    api_error = str(result)
+                    continue
+                raw = result
+                for attr in ("total_cost_usd", "duration_ms", "num_turns"):
+                    value = getattr(message, attr, None)
+                    if value is not None:
+                        meta[attr] = value
+    except Exception as e:
+        # SDK 层偶尔会在响应异常时直接抛裸异常，不经过上面的
+        # is_error/subtype 分支——兜住，转成同一套错误处理。
+        api_error = f"{type(e).__name__}: {e}"
 
     if stats is not None:
         stats.append(meta)
@@ -667,3 +693,184 @@ async def review_all(
     for part in await asyncio.gather(*(run_batch(b) for b in batches)):
         merged.update(part)
     return merged
+
+
+# ---- 选择 + 审查合并成一次调用 ----
+#
+# 老流程是"代码按单一排序标准截断到前 N 个 → 送审"：soft_preferences
+# （比如"尽量亚洲转机"）完全不参与"选哪几个候选"这一步——如果排在前面的
+# 候选恰好都不满足偏好，那些满足偏好的候选在送审之前就被排序丢掉了，
+# 这里的 agent 压根没机会评价它们。
+#
+# 现在把"选择"也交给同一次调用：把候选池（不只是价格最低的几个）连同
+# 排序诉求和软偏好一起喂给 agent，让它自己判断该深入审查哪几个——不是
+# 机械的价格最低前 N 个。只对选中的候选写完整的 risks/assurances/
+# preference_notes，没选中的只是"看到了"，不产出分析。没有多打一次
+# API，只是同一次调用的输入更大（候选池的结构化数据，便宜）、输出仍然
+# 只对应最终要展示的那几个（推理开销集中在这里，贵的部分没有变多）。
+_SELECT_AND_REVIEW_NOTE = """
+
+## 你还要做一件事：从候选池里选出最值得深入审查的几个
+
+下面给的是候选池（不只是价格最低的几个，是更大的一批）。你要做两件事：
+
+1. **结合用户的排序诉求（sort_pref）和自由文本偏好（soft_preferences），
+   选出最多 {limit} 个最值得深入审查的候选**。不是机械选价格最低的
+   {limit} 个——如果 soft_preferences 里提到某种偏好（比如经某个地区
+   转机、不想坐红眼航班），候选池里满足这条偏好的选项应该被优先考虑，
+   即使它们不是价格最低的那几个。sort_pref 是主要标准，soft_preferences
+   是在此基础上的加分项，不是要你完全无视 sort_pref 乱选。
+2. 只对选中的候选写完整的 risks/assurances/preference_notes，没选中的
+   不用管，不要为它们编造分析。
+
+`selected_candidate_ids` 必须是你的最终选择（不超过 {limit} 个）。
+`selection_note` 写一句话给用户看，说清楚你为什么这么选、有没有为了
+照顾某条偏好而放弃了更便宜/更快的选项——**用大白话，不要用字段名**。
+"""
+
+_SELECT_AND_REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "selected_candidate_ids": {"type": "array", "items": {"type": "integer"}},
+        "selection_note": {"type": "string"},
+        "results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "candidate_id": {"type": "integer"},
+                    "risks": _RISK_SCHEMA["properties"]["risks"],
+                    "assurances": {"type": "array", "items": _ASSURANCE_ITEM},
+                    "preference_notes": {
+                        "type": "array",
+                        "items": _PREFERENCE_ITEM,
+                    },
+                },
+                "required": [
+                    "candidate_id",
+                    "risks",
+                    "assurances",
+                    "preference_notes",
+                ],
+            },
+        },
+    },
+    "required": ["selected_candidate_ids", "selection_note", "results"],
+}
+
+
+async def select_and_review(
+    pool: list[FlightPriceComparison],
+    limit: int,
+    stats: list[dict] | None = None,
+    trip_context: TripContext | None = None,
+    sort_pref: str = "price",
+    model: str | None = None,
+    ledger: BudgetLedger | None = None,
+    web_search: bool = False,
+    max_searches: int = 6,
+    reserve: float = 0.0,
+    soft_preferences: list[str] | None = None,
+    cache=None,
+    pool_cap: int = 7,
+) -> tuple[dict[str, Findings], list[str], str]:
+    """从候选池里选出最多 limit 个候选并审查，一次调用完成（见上方说明）。
+
+    返回 (风险审查结果, 被选中的 itinerary_key 列表, agent 给用户看的
+    选择理由)。
+
+    pool 的顺序由调用方决定（通常已经按 sort_pref 排过序）——这里不重新
+    按价格排序，只是在那个顺序上按 pool_cap 截断控制输入 token。如果
+    sort_pref 是"转机次数少"，池子就该是转机最少的那些，而不是价格最
+    低的那些。
+
+    pool_cap：候选池太大时截断，控制输入 token——决定"要不要深入看"
+    比"深入看"便宜得多，所以这个上限可以比 limit 宽松很多。
+    """
+    if not pool:
+        return {}, [], ""
+
+    ranked_pool = pool[:pool_cap]
+
+    if ledger is not None:
+        ledger.guard(
+            f"选择+审查（候选池 {len(ranked_pool)} 个，选至多 {limit} 个）",
+            reserve=reserve,
+            kind="review",
+        )
+
+    payload = [
+        {"candidate_id": i, **build_context(c, trip_context, soft_preferences, cache)}
+        for i, c in enumerate(ranked_pool)
+    ]
+    prompt = (
+        _SELECT_AND_REVIEW_NOTE.format(limit=limit)
+        + f"\n用户的排序诉求（sort_pref）：{sort_pref}\n\n"
+        f"候选池（共 {len(ranked_pool)} 个，candidate_id 从 0 开始）：\n"
+        + json.dumps(payload, ensure_ascii=False, indent=1)
+    )
+
+    raw: str | None = None
+    meta: dict = {"batch_size": len(ranked_pool)}
+    api_error: str | None = None
+    try:
+        async for message in query(
+            prompt=prompt,
+            options=build_options(
+                _SELECT_AND_REVIEW_SCHEMA, model, web_search, max_searches, cache
+            ),
+        ):
+            result = getattr(message, "result", None)
+            if result is not None:
+                if getattr(message, "is_error", False) or (
+                    getattr(message, "subtype", "success") != "success"
+                ):
+                    api_error = str(result)
+                    continue
+                raw = result
+                for attr in ("total_cost_usd", "duration_ms", "num_turns"):
+                    value = getattr(message, attr, None)
+                    if value is not None:
+                        meta[attr] = value
+    except Exception as e:
+        # SDK 层偶尔会在收到超大响应时直接抛裸异常（不经过上面的
+        # is_error/subtype 分支），实测候选池太大时触发过。这里兜住，
+        # 转成和上面同一套错误处理，不让它变成没有排查线索的 500。
+        api_error = f"{type(e).__name__}: {e}"
+
+    if stats is not None:
+        stats.append(meta)
+    if ledger is not None:
+        ledger.record_from_meta(
+            f"选择+审查({len(ranked_pool)} 候选池)", meta, kind="review"
+        )
+
+    if api_error is not None:
+        raise RuntimeError(_explain_api_error("选择+审查", api_error))
+    if raw is None:
+        raise RuntimeError("选择+审查未返回结果")
+
+    parsed = json.loads(raw) if isinstance(raw, str) else raw
+    selected_ids = [
+        i
+        for i in parsed.get("selected_candidate_ids", [])
+        if 0 <= i < len(ranked_pool)
+    ][:limit]
+    selected_keys = [ranked_pool[i].itinerary_key for i in selected_ids]
+
+    out: dict[str, Findings] = {
+        ranked_pool[i].itinerary_key: ([], [], []) for i in selected_ids
+    }
+    for row in parsed.get("results", []):
+        idx = row["candidate_id"]
+        if idx not in selected_ids:
+            continue  # 只信任选中范围内的结果，没选中却编了分析的丢弃
+        out[ranked_pool[idx].itinerary_key] = (
+            [Risk.model_validate(r) for r in row["risks"]],
+            [Assurance.model_validate(a) for a in row.get("assurances", [])],
+            [
+                PreferenceNote.model_validate(n)
+                for n in row.get("preference_notes", [])
+            ],
+        )
+    return out, selected_keys, parsed.get("selection_note", "")

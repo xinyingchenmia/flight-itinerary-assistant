@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>机票行程助手</title>
+<link rel="stylesheet" href="/static/style.css?v=2" />
+</head>
+<body>
+<header>
+  <h1>机票行程助手</h1>
+  <p class="sub">携程 · 风险审查 agent + 澄清对话 agent</p>
+</header>
+
+<main id="app">
+
+  <!-- 步骤 1：自然语言输入 -->
+  <section id="step-query" class="card">
+    <h2>1. 说说你的需求</h2>
+    <p class="hint">随便说，出发地/目的地/日期是唯一必须的，其余(护照、行李、偏好……)能说多少算多少，说不清的会在后面问你。</p>
+    <form id="query-form">
+      <textarea id="query-text" rows="4" placeholder="比如：我9/26要从上海去芝加哥，想尽量在亚洲转机，价格低，转机次数少。护照是中国的，托运一件行李，落地后住市区，只能坐公共交通。"></textarea>
+      <div class="row">
+        <label>AI 分析成本上限（USD，不是机票预算）<input id="query-budget" type="number" step="0.05" value="0.50" /></label>
+      </div>
+      <button type="submit" class="primary" id="parse-btn">开始</button>
+    </form>
+  </section>
+
+  <!-- 步骤 1.5：确认解析结果 -->
+  <section id="step-confirm" class="card hidden">
+    <h2>确认一下</h2>
+    <p id="confirm-summary" class="summary-text"></p>
+    <div id="confirm-details" class="meta-line"></div>
+    <div id="confirm-missing" class="missing-note hidden"></div>
+    <div class="confirm-actions">
+      <button type="button" id="confirm-back">重新说一遍</button>
+      <button type="button" id="confirm-go" class="primary">没问题，继续</button>
+    </div>
+  </section>
+
+  <!-- 步骤 2：手动抓包 -->
+  <section id="step-capture" class="card hidden">
+    <h2>2. 手动搜索一次（携程有反爬，自动化取数会被拦，这一步必须人工做）</h2>
+    <p class="bookmarklet-setup">
+      <strong>第一次用先设置</strong>：把这个按钮拖到浏览器的收藏栏／书签栏——
+      <a id="bookmarklet-link" class="bookmarklet-btn" onclick="return false;">📥 抓携程数据</a>
+      （拖不动的话：右键收藏栏 → 添加书签 → 网址粘贴成下面"复制脚本"的内容）
+    </p>
+    <p class="date-warning">
+      ⚠ 全程都搜 <strong id="capture-date-hint"></strong> 这一天，
+      不要顺手点别的日期看看——点了别的日期，抓到的就是那天的数据，
+      系统查出来会直接拒绝并提示你重新搜（不会悄悄拿错日期的数据用）。
+    </p>
+    <ol>
+      <li>点开 <a id="ctrip-link" target="_blank" rel="noopener">在携程里搜索这条航线</a>（用你自己已登录的浏览器，链接已经带好日期）</li>
+      <li>在携程页面上，点一下收藏栏里刚才拖进去的「📥 抓携程数据」</li>
+      <li>点一下页面上的搜索按钮（不改日期，就是重新点一下当前这次搜索）——抓到数据会自动下载，不用你再做别的</li>
+      <li>回到这个页面，下面会自动检测到并开始审查（不用手动点按钮）</li>
+    </ol>
+    <details class="fallback">
+      <summary>书签方式不方便？用 DevTools Console 也行</summary>
+      <ol>
+        <li>打开 DevTools（F12 或 Cmd+Option+I）→ Console 面板</li>
+        <li>粘贴下面这段脚本，回车 <button type="button" id="copy-script">复制脚本</button></li>
+        <li>点一下搜索按钮（不改日期）触发一次搜索，抓到会自动下载；没反应就手动运行 <code>__save()</code></li>
+      </ol>
+      <textarea id="capture-script-box" readonly></textarea>
+    </details>
+    <button id="import-btn" class="primary">手动检查一次（一般不用点，会自动检测）</button>
+    <p id="import-status"></p>
+  </section>
+
+  <!-- 步骤 3：结果 -->
+  <section id="step-results" class="card hidden">
+    <h2>3. 风险审查结果</h2>
+    <p id="results-meta"></p>
+    <div id="skipped-note"></div>
+    <div id="candidates"></div>
+  </section>
+
+  <!-- 步骤 4：行程规划助手 -->
+  <section id="step-clarify" class="card hidden">
+    <h2>4. 行程规划助手</h2>
+    <p id="clarify-intro"></p>
+    <p id="clarify-warning" class="wrong-date-note hidden"></p>
+    <div id="clarify-tips"></div>
+    <div id="clarify-menu"></div>
+    <div id="clarify-input-row" class="hidden">
+      <input id="clarify-custom" placeholder="想补充说的话（可留空）…" />
+      <button id="clarify-send" class="primary">提交选择</button>
+      <button id="clarify-skip">不用了，跳过</button>
+    </div>
+  </section>
+
+  <!-- 步骤 5：最终状态——不重复展示航班卡片，卡片在步骤 3 原地更新 -->
+  <section id="step-final" class="card hidden">
+    <h2>5. 完成</h2>
+    <p id="final-meta"></p>
+  </section>
+
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

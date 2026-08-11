@@ -1,0 +1,384 @@
+const $ = (sel) => document.querySelector(sel);
+const show = (sel) => $(sel).classList.remove("hidden");
+const hide = (sel) => $(sel).classList.add("hidden");
+
+let sessionId = null;
+
+const SEVERITY_LABEL = { blocker: "无法成行", major: "重要", minor: "留意" };
+const VERDICT_ICON = { good: "☺", poor: "☹", unknown: "?" };
+
+// ---- 步骤 1：自然语言 → 查询解析 agent ----
+let parsedQuery = null;
+
+const SORT_LABEL = { price: "价格", duration: "总时长", stops: "中转次数", layover: "中转等待时长" };
+const GROUND_LABEL = { taxi_ok: "可以打车", public_only: "只能公共交通", unknown: "不确定" };
+const LAYOVER_LABEL = { shorter: "越短越好", explore: "愿意长中转", no_preference: "无所谓", unknown: "不确定" };
+const FIELD_LABEL = { origin: "出发机场", dest: "到达机场", date: "日期" };
+
+$("#query-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const text = $("#query-text").value.trim();
+  if (!text) return;
+
+  $("#parse-btn").disabled = true;
+  $("#parse-btn").textContent = "理解中…";
+  try {
+    const res = await fetch("/api/parse", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, budget: Number($("#query-budget").value) || 0.5 }),
+    });
+    if (!res.ok) {
+      alert("解析失败: " + (await res.text()));
+      return;
+    }
+    parsedQuery = await res.json();
+    renderConfirm(parsedQuery);
+    show("#step-confirm");
+    $("#step-confirm").scrollIntoView({ behavior: "smooth" });
+  } finally {
+    $("#parse-btn").disabled = false;
+    $("#parse-btn").textContent = "开始";
+  }
+});
+
+function renderConfirm(p) {
+  // summary 是 agent 自己写的大白话确认句，已经涵盖了国籍/护照/偏好这些
+  // 内容——不在这里用"字段名: 值"的格式重复一遍，那种格式对用户不友好。
+  // 这里只再补一行最关键、agent 的 summary 未必会点出来的路线信息。
+  $("#confirm-summary").textContent = p.summary || "";
+
+  const route = `${p.origin} → ${p.dest}　${p.date}　按${SORT_LABEL[p.sort_pref] || p.sort_pref}排序`;
+  $("#confirm-details").textContent = route;
+
+  // 只有 origin/dest/date 缺了才真正拦得住——没有这三样连携程搜索链接
+  // 都拼不出来。国籍/护照/托运件数这些不是取数的前提，就算 agent 没
+  // 完全守住 prompt 里的规则把它们也塞进了 missing，这里也不该拦，
+  // 那些缺口该在澄清对话那一步问，不是在这里卡住你。
+  const HARD_REQUIRED = ["origin", "dest", "date"];
+  const hardMissing = (p.missing || []).filter((m) => HARD_REQUIRED.includes(m));
+
+  const missingBox = $("#confirm-missing");
+  if (hardMissing.length) {
+    missingBox.textContent =
+      "没听清楚：" + hardMissing.map((m) => FIELD_LABEL[m] || m).join("、") + "——回去补充一下再继续。";
+    show("#confirm-missing");
+    $("#confirm-go").disabled = true;
+  } else {
+    hide("#confirm-missing");
+    $("#confirm-go").disabled = false;
+  }
+}
+
+$("#confirm-back").onclick = () => {
+  hide("#step-confirm");
+  $("#step-query").scrollIntoView({ behavior: "smooth" });
+};
+
+$("#confirm-go").onclick = async () => {
+  const p = parsedQuery;
+  const body = {
+    origin: p.origin,
+    dest: p.dest,
+    date: p.date,
+    sort: p.sort_pref,
+    max_stops: p.max_stops,
+    budget: p.budget,
+    soft_prefs: p.soft_preferences || [],
+    nationality: p.nationality,
+    passport_expiry: p.passport_expiry,
+    destination_after_arrival: p.destination_after_arrival,
+    ground_transport_ok: p.ground_transport_ok,
+    checked_bags: p.checked_bags,
+    layover_preference: p.layover_preference,
+  };
+
+  const res = await fetch("/api/search", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    alert("发起查询失败: " + (await res.text()));
+    return;
+  }
+  const data = await res.json();
+  sessionId = data.session_id;
+
+  $("#ctrip-link").href = data.ctrip_url;
+  $("#bookmarklet-link").href = data.capture_bookmarklet;
+  $("#capture-script-box").value = data.capture_script;
+  show("#step-capture");
+  $("#step-capture").scrollIntoView({ behavior: "smooth" });
+  startCapturePolling();
+};
+
+// ---- 步骤 2：复制脚本（DevTools 兜底方式） ----
+$("#copy-script").onclick = async () => {
+  await navigator.clipboard.writeText($("#capture-script-box").value);
+  $("#copy-script").textContent = "已复制 ✓";
+  setTimeout(() => ($("#copy-script").textContent = "复制脚本"), 1500);
+};
+
+// ---- 自动轮询：文件一出现在 ~/Downloads 就自动导入，不用手动点 ----
+let capturePolling = false;
+let importing = false;
+
+async function startCapturePolling() {
+  capturePolling = true;
+  while (capturePolling) {
+    await new Promise((r) => setTimeout(r, 2500));
+    if (!capturePolling || importing) continue;
+    try {
+      const res = await fetch(`/api/session/${sessionId}/capture-status`);
+      const data = await res.json();
+      if (data.ready) {
+        $("#import-status").textContent = "检测到抓包文件，自动导入中…";
+        $("#import-status").className = "ready";
+        await doImport();
+        return;
+      }
+    } catch (e) {
+      // 轮询失败不打断，下一轮再试
+    }
+  }
+}
+
+async function doImport() {
+  if (importing) return;
+  importing = true;
+  capturePolling = false;
+  $("#import-status").textContent = "正在导入并跑风险审查（可能要 20-60 秒）…";
+  $("#import-status").className = "";
+  $("#import-btn").disabled = true;
+  try {
+    const res = await fetch(`/api/session/${sessionId}/import`, { method: "POST" });
+    if (!res.ok) {
+      $("#import-status").textContent = "失败: " + (await res.text());
+      $("#import-btn").disabled = false;
+      importing = false;
+      capturePolling = true; // 失败了继续轮询，可能是文件还没写完
+      return;
+    }
+    const data = await res.json();
+    $("#import-status").textContent = "";
+    renderResults(data);
+    show("#step-results");
+    $("#step-results").scrollIntoView({ behavior: "smooth" });
+
+    // 不再按"有没有需要确认的风险"决定要不要进入这一步——行程规划助手
+    // 自己判断有没有值得建议的东西，哪怕风险审查没标任何需要确认的项，
+    // 它也可能想到"中转很久，要不要查查机场怎么打发时间"这类建议。
+    startClarify();
+  } finally {
+    $("#import-btn").disabled = false;
+  }
+}
+
+$("#import-btn").onclick = doImport;
+
+// ---- 渲染候选卡片（复用同一份逻辑给结果/最终结果两处用） ----
+function fmtTime(iso) {
+  // 后端给的是不带时区的本地时间 ISO 字符串（航班当地时间），直接摘
+  // 月/日 时:分，不做时区换算——时区换算会把"当地时间"变成误导信息。
+  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if (!m) return iso;
+  return `${Number(m[2])}/${Number(m[3])} ${m[4]}:${m[5]}`;
+}
+
+function renderCandidateCard(c) {
+  const div = document.createElement("div");
+  div.className = "candidate";
+
+  const conn =
+    c.connections.length === 0
+      ? "直飞"
+      : c.connections.map((x) => `${x.airport} 停 ${Math.floor(x.gap_min / 60)}h${String(x.gap_min % 60).padStart(2, "0")}m`).join(" / ");
+
+  const hasBlocker = c.issues.some((r) => r.severity === "blocker");
+
+  let html = `
+    <div class="head">
+      <span class="price">#${c.rank} ¥${c.price}</span>
+      <span class="route">${c.route.join(" → ")}　${Math.floor(c.duration_min / 60)}h${String(c.duration_min % 60).padStart(2, "0")}m　${conn}</span>
+    </div>
+    <div class="flight-legs">
+  `;
+  for (const f of c.flights) {
+    html += `<div class="leg">${f.carrier}${f.flight_no.slice(f.carrier.length)}　${f.dep_airport} ${fmtTime(f.dep_time)} → ${f.arr_airport} ${fmtTime(f.arr_time)}</div>`;
+  }
+  html += `</div>`;
+  html += `<div class="sub-line">${c.ticket_count > 1 ? "⚠ 分 " + c.ticket_count + " 张票　" : ""}${c.platforms.join("/")}</div>`;
+
+  if (hasBlocker) html += `<div class="blocker-banner">⛔ 这个方案可能走不通：</div>`;
+
+  if (c.issues.length) {
+    html += `<div class="bucket-label">需要确认的问题</div>`;
+    for (const r of c.issues) {
+      const tag = r.needs_user_input ? `<span class="tag">待你确认</span>` : "";
+      html += `<div class="finding risk-${r.severity}">● [${SEVERITY_LABEL[r.severity]}] ${escapeHtml(r.evidence)}${tag}</div>`;
+    }
+  }
+
+  if (c.confirmed_ok.length) {
+    html += `<div class="bucket-label">没问题的地方</div>`;
+    for (const item of c.confirmed_ok) {
+      if (item._kind === "assurance") {
+        html += `<div class="finding assurance">✓ ${escapeHtml(item.statement)}<span class="evidence">依据：${escapeHtml(item.evidence)}</span></div>`;
+      } else {
+        html += `<div class="finding pref-good">☺ 关于「${escapeHtml(item.preference)}」：${escapeHtml(item.statement)}</div>`;
+      }
+    }
+  }
+
+  if (c.unmet_preferences.length) {
+    html += `<div class="bucket-label">没满足的偏好</div>`;
+    for (const n of c.unmet_preferences) {
+      html += `<div class="finding pref-${n.verdict}">${VERDICT_ICON[n.verdict]} 关于「${escapeHtml(n.preference)}」：${escapeHtml(n.statement)}</div>`;
+    }
+  }
+
+  if (!c.issues.length && !c.confirmed_ok.length && !c.unmet_preferences.length) {
+    html += `<div class="finding">（未发现需要提示的问题）</div>`;
+  }
+
+  div.innerHTML = html;
+  return div;
+}
+
+function escapeHtml(s) {
+  const d = document.createElement("div");
+  d.textContent = s ?? "";
+  return d.innerHTML;
+}
+
+function renderResults(data) {
+  $("#results-meta").textContent =
+    `候选池 ${data.pool_size} 个，耗时 ${data.elapsed_s.toFixed(0)}s，成本 $${data.cost_usd.toFixed(4)}，` +
+    `AI 分析已花费 $${data.budget_spent.toFixed(4)} / $${data.budget_cap.toFixed(2)}` +
+    (data.pending_clarifications ? `，有 ${data.pending_clarifications} 条待澄清` : "");
+
+  const skippedBox = $("#skipped-note");
+  skippedBox.innerHTML = "";
+  if (data.selection_note) {
+    const p = document.createElement("div");
+    p.className = "skipped-list";
+    p.textContent = "挑选依据：" + data.selection_note;
+    skippedBox.appendChild(p);
+  }
+  if (data.ignored_wrong_date && data.ignored_wrong_date.length) {
+    const p = document.createElement("div");
+    p.className = "wrong-date-note";
+    p.textContent =
+      "⚠ 抓到的数据里有一部分是 " + data.ignored_wrong_date.join("、") +
+      " 这些日期的，已经忽略，只用了你要查的那天。";
+    skippedBox.appendChild(p);
+  }
+
+  const box = $("#candidates");
+  box.innerHTML = "";
+  for (const c of data.candidates) box.appendChild(renderCandidateCard(c));
+}
+
+// ---- 步骤 4：澄清对话（长轮询） ----
+const PRIORITY_LABEL = { high: "建议先看这个", normal: "" };
+let shownTipLabels = new Set();
+
+async function startClarify() {
+  show("#step-clarify");
+  $("#clarify-intro").textContent = "行程规划助手正在看有什么值得帮你深挖的……";
+  shownTipLabels = new Set();
+  await fetch(`/api/session/${sessionId}/clarify/start`, { method: "POST" });
+  pollClarify();
+}
+
+function renderTips(tips) {
+  const box = $("#clarify-tips");
+  for (const t of tips) {
+    if (shownTipLabels.has(t.label + t.statement)) continue;
+    shownTipLabels.add(t.label + t.statement);
+    const div = document.createElement("div");
+    div.className = "tip-card";
+    div.innerHTML = `<div class="tip-label">${escapeHtml(t.label)}</div>
+      <div class="tip-statement">${escapeHtml(t.statement)}</div>
+      <div class="tip-evidence">依据：${escapeHtml(t.evidence)}</div>`;
+    box.appendChild(div);
+  }
+}
+
+function renderMenu(items) {
+  const box = $("#clarify-menu");
+  box.innerHTML = "";
+  if (!items.length) return;
+  for (const it of items) {
+    const row = document.createElement("label");
+    row.className = "menu-item";
+    row.innerHTML = `<input type="checkbox" value="${it.id}" />
+      <span class="menu-label">${escapeHtml(it.label)}${it.priority === "high" ? '<span class="tag">建议先看这个</span>' : ""}</span>
+      <span class="menu-based-on">依据：${escapeHtml(it.based_on)}</span>`;
+    box.appendChild(row);
+  }
+}
+
+async function pollClarify() {
+  while (true) {
+    const res = await fetch(`/api/session/${sessionId}/clarify/poll`);
+    const data = await res.json();
+    renderTips(data.tips || []);
+    if (data.warning) {
+      $("#clarify-warning").textContent = "⚠ " + data.warning;
+      show("#clarify-warning");
+    }
+    if (data.done) {
+      hide("#clarify-input-row");
+      $("#clarify-menu").innerHTML = "";
+      $("#clarify-intro").textContent = data.error
+        ? "（行程规划助手出错: " + data.error + "）"
+        : "行程规划助手完成了，没有更多建议了。";
+      finalize();
+      return;
+    }
+    if (data.menu && data.menu.length) {
+      $("#clarify-intro").textContent = "要不要我帮你查查这些？勾选想深挖的，或者留空直接跳过。";
+      renderMenu(data.menu);
+      show("#clarify-input-row");
+      return; // 等用户提交，提交后会重新调用 pollClarify()
+    }
+    // 超时轮询没有新菜单，继续等
+  }
+}
+
+$("#clarify-send").onclick = () => sendSelection(false);
+$("#clarify-skip").onclick = () => sendSelection(true);
+
+async function sendSelection(skip) {
+  const selectedIds = skip
+    ? []
+    : Array.from($("#clarify-menu").querySelectorAll("input:checked")).map((el) => el.value);
+  const custom = skip ? "" : $("#clarify-custom").value.trim();
+  $("#clarify-custom").value = "";
+  $("#clarify-menu").innerHTML = "";
+  hide("#clarify-input-row");
+  await fetch(`/api/session/${sessionId}/clarify/answer`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ selected_ids: selectedIds, custom }),
+  });
+  pollClarify();
+}
+
+// ---- 步骤 5：最终状态（原地更新步骤 3 的卡片，不重复展示一遍） ----
+async function finalize() {
+  const res = await fetch(`/api/session/${sessionId}/finalize`, { method: "POST" });
+  const data = await res.json();
+  show("#step-final");
+  $("#step-final").scrollIntoView({ behavior: "smooth" });
+
+  let meta = `AI 分析已花费 $${data.budget_spent.toFixed(4)} / $${data.budget_cap.toFixed(2)}，采纳更新 ${data.updates_applied} 条`;
+  if (data.warning) meta += `　⚠ ${data.warning}`;
+  $("#final-meta").textContent = meta;
+
+  const box = $("#candidates");
+  box.innerHTML = "";
+  for (const c of data.candidates) box.appendChild(renderCandidateCard(c));
+}

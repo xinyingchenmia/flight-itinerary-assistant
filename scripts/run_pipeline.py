@@ -31,7 +31,7 @@ from flight_assistant.budget import (  # noqa: E402
 )
 from flight_assistant.budget import check as budget_check  # noqa: E402
 from flight_assistant.budget import cost_of  # noqa: E402
-from flight_assistant.clarification.agent import clarify  # noqa: E402
+from flight_assistant.clarification.agent import plan  # noqa: E402
 from flight_assistant.factcache import FactCache  # noqa: E402
 from flight_assistant.filtering import TripRequest, filter_and_sort  # noqa: E402
 from flight_assistant.matching import group_and_compare  # noqa: E402
@@ -105,17 +105,41 @@ def _canned_answer(question: str) -> tuple[str, str]:
     return " ".join(answers), "命中 " + "、".join(f"「{h}」" for h in hits)
 
 
-def build_answer_fn(interactive: bool):
-    async def answer(question: str) -> str:
-        print(f"\n  【agent 提问】{question.strip()}")
-        if interactive:
-            reply = input("  你的回答> ")
-        else:
-            reply, why = _canned_answer(question)
-            print(f"  【预设应答】{reply}   ({why})")
-        return reply
+def build_selection_fn(interactive: bool):
+    """行程规划助手（agent.plan）用的选择函数：给一份建议菜单，返回
+    {"selected_ids": [...], "custom": "..."}。
 
-    return answer
+    非交互模式沿用原来的预设画像，但语义变了：以前是"逐题作答"，现在是
+    "选中高优先级(必须解决)的建议，把预设画像里能匹配上的信息塞进
+    custom"——普通优先级(锦上添花)的建议不自动选，因为预设画像里没有
+    "机场有什么好逛的"这种信息，选了也白选。
+    """
+
+    async def selection_fn(items: list[dict]) -> dict:
+        print("\n  【规划助手建议】")
+        for it in items:
+            print(f"    [{it['priority']}] {it['id']}: {it['label']}（依据：{it['based_on']}）")
+
+        if interactive:
+            raw = input("  选择要查的编号，逗号分隔，回车=都不选> ")
+            ids = {s.strip() for s in raw.split(",") if s.strip()}
+            selected = [it["id"] for it in items if it["id"] in ids]
+            custom = input("  有什么想直接补充说明的吗（可留空）> ")
+            return {"selected_ids": selected, "custom": custom}
+
+        selected = [it for it in items if it["priority"] == "high"]
+        answers: list[str] = []
+        for it in selected:
+            reply, why = _canned_answer(it["label"] + " " + it["based_on"])
+            answers.append(reply)
+        custom = " ".join(dict.fromkeys(answers))
+        print(
+            f"  【预设应答】选中 {len(selected)} 项高优先级建议，"
+            f"补充: {custom or '（无匹配预设，留空）'}"
+        )
+        return {"selected_ids": [it["id"] for it in selected], "custom": custom}
+
+    return selection_fn
 
 
 def load_fetched(path: Path) -> list[tuple[Itinerary, PlatformOffer]]:
@@ -442,12 +466,8 @@ async def main() -> int:
     if turns:
         print(f"工具调用轮次: 平均 {sum(turns) / len(turns):.1f} 轮")
 
-    # 步骤 6：澄清对话 agent
-    print(f"\n{'=' * 72}\n步骤 6：澄清对话 agent\n{'=' * 72}")
-    flagged = sum(
-        1 for rs, *_ in risks_by_key.values() for r in rs if r.needs_user_input
-    )
-    print(f"标记 needs_user_input 的风险共 {flagged} 条")
+    # 步骤 6：行程规划助手 agent
+    print(f"\n{'=' * 72}\n步骤 6：行程规划助手 agent\n{'=' * 72}")
     print(f"应答模式: {'真人交互' if args.interactive else '预设画像'}")
     if not args.interactive:
         print("预设应答规则:")
@@ -455,18 +475,25 @@ async def main() -> int:
             print(f"  {'/'.join(keywords[:3])} → {answer}")
 
     if injected_ctx is not None:
-        print("已注入 --trip-context，跳过澄清对话（用于便宜地验证步骤 7/8）")
-        updates, trip_ctx = [], injected_ctx
+        print("已注入 --trip-context，跳过行程规划（用于便宜地验证步骤 7/8）")
+        updates, trip_ctx, tips, budget_warning = [], injected_ctx, [], None
     else:
-        print(f"进入澄清前已花费 ${ledger.spent:.4f} / ${ledger.cap:.2f}")
+        print(f"进入规划前已花费 ${ledger.spent:.4f} / ${ledger.cap:.2f}")
         t0 = time.monotonic()
-        updates, trip_ctx = await clarify(
+        updates, trip_ctx, tips, budget_warning = await plan(
+            subject,
             risks_by_key,
-            build_answer_fn(args.interactive),
+            build_selection_fn(args.interactive),
             trip_context=injected_ctx,
             ledger=ledger,
         )
-        print(f"\n澄清结束，耗时 {time.monotonic() - t0:.1f}s")
+        print(f"\n规划结束，耗时 {time.monotonic() - t0:.1f}s")
+        if budget_warning:
+            print(f"⚠ {budget_warning}")
+        if tips:
+            print(f"\n查到的补充信息 {len(tips)} 条：")
+            for t in tips:
+                print(f"  · [{t.label}] {t.statement}（依据：{t.evidence}）")
     print(f"\n收集到的用户侧信息 (TripContext):")
     for k, v in trip_ctx.model_dump(mode="json").items():
         mark = "  " if v in (None, "unknown", {}, []) else "✓ "

@@ -163,3 +163,16 @@ class Risk(BaseModel):
     needs_user_input: bool  # True → 路由给澄清对话 agent
     prob: float | None
     cost_if_realized: Decimal | None
+
+
+class TripTip(BaseModel):
+    """规划助手 agent 主动帮用户查到的结论（用户从建议菜单里选了才查）。
+
+    和 Assurance 的区别：Assurance 是风险审查过程中顺带查到的"没问题"，
+    TripTip 是用户自己选中要深挖的东西查出来的结果——比如"中转 4 小时，
+    要不要查查机场有什么好逛的"这种，不是风险判断，纯粹是锦上添花的信息。
+    """
+
+    label: str  # 对应哪条建议（用户勾选时看到的那句话）
+    statement: str  # 查到的结论，给用户看的一句话
+    evidence: str  # 依据/来源

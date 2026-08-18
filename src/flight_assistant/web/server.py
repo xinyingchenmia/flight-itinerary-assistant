@@ -62,6 +62,10 @@ CAPTURE_SCRIPT = REPO_ROOT / "scripts" / "capture_pull.js"
 FACT_CACHE_PATH = Path.home() / ".flight-assistant-facts.json"
 
 REVIEW_LIMIT = 3  # 深入审查几个候选——这个数字小省时间，跟候选池大小无关
+# 候选池太大时截断，控制送进 select_and_review 那次调用的输入 token——
+# 抓到的候选总数（pool_size）可能远大于这个数，但只有这前 POOL_CAP 条
+# 会被喂给 agent 看，不是全部都送去分析。见 select_and_review() 的文档。
+POOL_CAP = 7
 DEFAULT_BUDGET = 0.5
 # 和 run_pipeline.py 的 --max-searches 默认一致。降这个值省钱但会漏报——
 # 见 run_pipeline.py 里 --max-searches 的注释，PEK/PKX 同城不同机场那个
@@ -509,6 +513,7 @@ async def import_and_review(session_id: str) -> dict:
             reserve=0.15,  # 给澄清对话留额度，理由见 budget.py 的 guard() 注释
             web_search=True,  # 不开的话查不到的事实一律标"无数据源"，不会去查
             max_searches=DEFAULT_MAX_SEARCHES,
+            pool_cap=POOL_CAP,
         )
     except BudgetExceeded as e:
         raise HTTPException(402, str(e))
@@ -536,6 +541,7 @@ async def import_and_review(session_id: str) -> dict:
         ],
         "selection_note": selection_note,
         "pool_size": len(pool),
+        "pool_examined": min(len(pool), POOL_CAP),
         "pending_clarifications": flagged,
         "cost_usd": cost_of(session.stats),
         "elapsed_s": elapsed,

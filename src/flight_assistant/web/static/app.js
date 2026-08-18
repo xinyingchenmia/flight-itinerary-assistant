@@ -254,7 +254,8 @@ function escapeHtml(s) {
 
 function renderResults(data) {
   $("#results-meta").textContent =
-    `候选池 ${data.pool_size} 个，耗时 ${data.elapsed_s.toFixed(0)}s，成本 $${data.cost_usd.toFixed(4)}，` +
+    `共抓到 ${data.pool_size} 个候选，实际送审 ${data.pool_examined} 个（不是全部 ${data.pool_size} 个都跑了 AI），` +
+    `耗时 ${data.elapsed_s.toFixed(0)}s，成本 $${data.cost_usd.toFixed(4)}，` +
     `AI 分析已花费 $${data.budget_spent.toFixed(4)} / $${data.budget_cap.toFixed(2)}` +
     (data.pending_clarifications ? `，有 ${data.pending_clarifications} 条待澄清` : "");
 

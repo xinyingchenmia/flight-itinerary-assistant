@@ -145,17 +145,18 @@ code {
 #soft-prefs .remove-pref { flex: 0 0 auto; }
 
 .candidate {
+  position: relative;
   border: 1px solid var(--border);
   border-radius: 10px;
-  padding: 14px 18px;
+  padding: 44px 18px 14px;
   margin-bottom: 14px;
+  overflow: hidden;
 }
 .candidate .head {
   display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 8px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
 }
 .candidate .price { font-size: 1.15rem; font-weight: 600; }
 .candidate .route { color: var(--muted); font-size: 0.9rem; }
@@ -176,16 +177,93 @@ code {
   margin: 10px 0 2px;
 }
 
-.blocker-banner {
-  color: var(--blocker);
-  font-weight: 600;
-  margin: 8px 0 4px;
+.finding { margin: 6px 0; padding-left: 4px; font-size: 0.92rem; color: var(--muted); }
+
+/* ---- 海关图章：每条审查结论盖一个章，三色 + 一个虚线待定章 ---- */
+.finding-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 9px 0;
+}
+.finding-text { font-size: 0.9rem; padding-top: 3px; }
+.finding-text .evidence { color: var(--muted); font-size: 0.82rem; display: block; margin-top: 2px; }
+
+.stamp {
+  flex: 0 0 auto;
+  position: relative;
+  display: inline-block;
+  border: 2.5px solid currentColor;
+  border-radius: 7px;
+  padding: 3px 9px;
+  font-weight: 800;
+  font-size: 0.66rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  transform: rotate(var(--rot, -6deg));
+  animation: stamp-drop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+.stamp::after {
+  content: "";
+  position: absolute;
+  inset: 2.5px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  opacity: 0.55;
+}
+.stamp-hold { color: var(--blocker); }
+.stamp-note { color: var(--major); }
+.stamp-clear { color: var(--good); }
+.stamp-pending {
+  color: var(--muted);
+  border-style: dashed;
 }
 
-.finding { margin: 6px 0; padding-left: 4px; font-size: 0.92rem; }
-.finding.risk-blocker { color: var(--blocker); }
-.finding.risk-major { color: var(--major); }
-.finding.risk-minor { color: var(--minor); }
+.pending-clickable {
+  cursor: pointer;
+  border-radius: 6px;
+  margin: 6px -6px;
+  padding: 3px 6px;
+  transition: background 0.15s;
+}
+.pending-clickable:hover { background: var(--accent-bg); }
+.pending-clickable:hover .stamp-pending { color: var(--accent); }
+.click-hint {
+  display: block;
+  color: var(--accent);
+  font-size: 0.78rem;
+  margin-top: 2px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.pending-clickable:hover .click-hint { opacity: 1; }
+
+@keyframes stamp-drop {
+  0% { transform: translateY(-30px) rotate(var(--rot, -6deg)) scale(1.7); opacity: 0; }
+  55% { transform: translateY(3px) rotate(var(--rot, -6deg)) scale(0.94); opacity: 1; }
+  100% { transform: translateY(0) rotate(var(--rot, -6deg)) scale(1); opacity: 1; }
+}
+
+/* ---- 整张候选的综合裁定大章，贴在卡片右上角 ---- */
+.verdict-stamp {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  font-size: 0.95rem;
+  font-weight: 900;
+  border: 3.5px solid currentColor;
+  border-radius: 8px;
+  padding: 3px 14px;
+  transform: rotate(10deg);
+  opacity: 0.92;
+  animation: stamp-drop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  animation-delay: 0.15s;
+  pointer-events: none;
+}
+.verdict-stamp.verdict-hold { color: var(--blocker); --rot: 10deg; }
+.verdict-stamp.verdict-note { color: var(--major); --rot: 10deg; }
+.verdict-stamp.verdict-clear { color: var(--good); --rot: 10deg; }
 .tag {
   font-size: 0.75rem;
   background: var(--accent-bg);

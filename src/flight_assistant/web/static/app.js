@@ -2,6 +2,21 @@ const $ = (sel) => document.querySelector(sel);
 const show = (sel) => $(sel).classList.remove("hidden");
 const hide = (sel) => $(sel).classList.add("hidden");
 
+// 点"待确认"图章直接跳到规划助手那栏、预填这条问题，不用自己去菜单里找。
+// 规划助手在导入结果后就已经自动开始跑了，这里只是把输入框亮出来。
+document.addEventListener("click", (e) => {
+  const row = e.target.closest(".pending-clickable");
+  if (!row) return;
+  const question = row.dataset.question || "";
+  show("#step-clarify");
+  show("#clarify-input-row");
+  const input = $("#clarify-custom");
+  input.value = `关于「${question}」：`;
+  $("#step-clarify").scrollIntoView({ behavior: "smooth", block: "start" });
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+});
+
 let sessionId = null;
 
 const SEVERITY_LABEL = { blocker: "无法成行", major: "重要", minor: "留意" };
@@ -186,6 +201,20 @@ function fmtTime(iso) {
   return `${Number(m[2])}/${Number(m[3])} ${m[4]}:${m[5]}`;
 }
 
+// 图章文案 + 样式类，风险审查结论按"海关审查"的感觉呈现——
+// HOLD(红/扣留) = blocker，NOTE(黄/留意) = major/minor，
+// PENDING(灰/虚线) = needs_user_input（还没审完，等你补充信息），
+// CLEAR(绿/放行) = 确认没问题的项。
+const STAMP_TEXT = { blocker: "扣留 HOLD", major: "留意 NOTE", minor: "留意 NOTE" };
+const STAMP_CLASS = { blocker: "stamp-hold", major: "stamp-note", minor: "stamp-note" };
+// 每个章给一点不同的倾斜角度，看起来不是机器整齐盖的
+const STAMP_ROTATIONS = [-7, 5, -4, 8, -9, 3, -5, 6];
+
+function stampHtml(cls, text, idx) {
+  const rot = STAMP_ROTATIONS[idx % STAMP_ROTATIONS.length];
+  return `<span class="stamp ${cls}" style="--rot:${rot}deg; animation-delay:${idx * 0.08}s">${text}</span>`;
+}
+
 function renderCandidateCard(c) {
   const div = document.createElement("div");
   div.className = "candidate";
@@ -196,8 +225,18 @@ function renderCandidateCard(c) {
       : c.connections.map((x) => `${x.airport} 停 ${Math.floor(x.gap_min / 60)}h${String(x.gap_min % 60).padStart(2, "0")}m`).join(" / ");
 
   const hasBlocker = c.issues.some((r) => r.severity === "blocker");
+  const hasIssue = c.issues.length > 0 || c.unmet_preferences.some((n) => n.verdict === "poor");
 
+  // 整张候选的"综合裁定"大章，贴在卡片角上
+  const verdict = hasBlocker
+    ? { cls: "verdict-hold", text: "不建议通行" }
+    : hasIssue
+    ? { cls: "verdict-note", text: "需要留意" }
+    : { cls: "verdict-clear", text: "一路畅通" };
+
+  let stampIdx = 0;
   let html = `
+    <div class="verdict-stamp ${verdict.cls}">${verdict.text}</div>
     <div class="head">
       <span class="price">#${c.rank} ¥${c.price}</span>
       <span class="route">${c.route.join(" → ")}　${Math.floor(c.duration_min / 60)}h${String(c.duration_min % 60).padStart(2, "0")}m　${conn}</span>
@@ -210,23 +249,27 @@ function renderCandidateCard(c) {
   html += `</div>`;
   html += `<div class="sub-line">${c.ticket_count > 1 ? "⚠ 分 " + c.ticket_count + " 张票　" : ""}${c.platforms.join("/")}</div>`;
 
-  if (hasBlocker) html += `<div class="blocker-banner">⛔ 这个方案可能走不通：</div>`;
-
   if (c.issues.length) {
     html += `<div class="bucket-label">需要确认的问题</div>`;
     for (const r of c.issues) {
-      const tag = r.needs_user_input ? `<span class="tag">待你确认</span>` : "";
-      html += `<div class="finding risk-${r.severity}">● [${SEVERITY_LABEL[r.severity]}] ${escapeHtml(r.evidence)}${tag}</div>`;
+      if (r.needs_user_input) {
+        const stamp = stampHtml("stamp-pending", "待确认 PENDING", stampIdx++);
+        html += `<div class="finding-row pending-clickable" data-question="${escapeHtml(r.evidence)}">${stamp}<span class="finding-text">${escapeHtml(r.evidence)}<span class="click-hint">点击直接补充信息 →</span></span></div>`;
+      } else {
+        const stamp = stampHtml(STAMP_CLASS[r.severity], STAMP_TEXT[r.severity], stampIdx++);
+        html += `<div class="finding-row">${stamp}<span class="finding-text">${escapeHtml(r.evidence)}</span></div>`;
+      }
     }
   }
 
   if (c.confirmed_ok.length) {
     html += `<div class="bucket-label">没问题的地方</div>`;
     for (const item of c.confirmed_ok) {
+      const stamp = stampHtml("stamp-clear", "放行 CLEAR", stampIdx++);
       if (item._kind === "assurance") {
-        html += `<div class="finding assurance">✓ ${escapeHtml(item.statement)}<span class="evidence">依据：${escapeHtml(item.evidence)}</span></div>`;
+        html += `<div class="finding-row">${stamp}<span class="finding-text">${escapeHtml(item.statement)}<span class="evidence">依据：${escapeHtml(item.evidence)}</span></span></div>`;
       } else {
-        html += `<div class="finding pref-good">☺ 关于「${escapeHtml(item.preference)}」：${escapeHtml(item.statement)}</div>`;
+        html += `<div class="finding-row">${stamp}<span class="finding-text">关于「${escapeHtml(item.preference)}」：${escapeHtml(item.statement)}</span></div>`;
       }
     }
   }
@@ -234,7 +277,14 @@ function renderCandidateCard(c) {
   if (c.unmet_preferences.length) {
     html += `<div class="bucket-label">没满足的偏好</div>`;
     for (const n of c.unmet_preferences) {
-      html += `<div class="finding pref-${n.verdict}">${VERDICT_ICON[n.verdict]} 关于「${escapeHtml(n.preference)}」：${escapeHtml(n.statement)}</div>`;
+      if (n.verdict === "poor") {
+        const stamp = stampHtml("stamp-note", "留意 NOTE", stampIdx++);
+        html += `<div class="finding-row">${stamp}<span class="finding-text">关于「${escapeHtml(n.preference)}」：${escapeHtml(n.statement)}</span></div>`;
+      } else {
+        const stamp = stampHtml("stamp-pending", "待确认 PENDING", stampIdx++);
+        const q = `关于「${n.preference}」：${n.statement}`;
+        html += `<div class="finding-row pending-clickable" data-question="${escapeHtml(q)}">${stamp}<span class="finding-text">关于「${escapeHtml(n.preference)}」：${escapeHtml(n.statement)}<span class="click-hint">点击直接补充信息 →</span></span></div>`;
+      }
     }
   }
 
@@ -382,4 +432,101 @@ async function finalize() {
   const box = $("#candidates");
   box.innerHTML = "";
   for (const c of data.candidates) box.appendChild(renderCandidateCard(c));
+}
+
+// ---- 演示模式：访问 ?demo=1 用假数据直接看视觉效果，不调用任何 API、不花钱 ----
+if (new URLSearchParams(location.search).get("demo") === "1") {
+  const FAKE_CANDIDATES = [
+    {
+      rank: 1, price: "6808", route: ["PVG", "HKG", "ORD"], duration_min: 1175, stop_count: 1,
+      connections: [{ airport: "HKG", gap_min: 120 }], ticket_count: 1, platforms: ["ctrip"],
+      flights: [
+        { carrier: "CX", flight_no: "CX303", dep_airport: "PVG", arr_airport: "HKG", dep_time: "2026-09-26T07:20:00", arr_time: "2026-09-26T09:50:00" },
+        { carrier: "CX", flight_no: "CX806", dep_airport: "HKG", arr_airport: "ORD", dep_time: "2026-09-26T11:50:00", arr_time: "2026-09-26T13:55:00" },
+      ],
+      issues: [
+        { severity: "blocker", evidence: "香港中转仅 120 分钟，且需更换航站楼，官方最短转机时间 90 分钟起，加上安检排队风险很大", needs_user_input: false },
+        { severity: "minor", evidence: "护照有效期未提供，需要确认是否满足六个月有效期要求", needs_user_input: true },
+      ],
+      confirmed_ok: [{ _kind: "assurance", statement: "行李可直挂到芝加哥，无需在香港重新托运", evidence: "国泰航空联程票行李直挂政策" }],
+      unmet_preferences: [{ verdict: "poor", preference: "尽量转机次数少", statement: "这条有一次转机，不是直飞" }],
+    },
+    {
+      rank: 2, price: "7200", route: ["PVG", "ORD"], duration_min: 780, stop_count: 0,
+      connections: [], ticket_count: 1, platforms: ["ctrip", "feizhu"],
+      flights: [{ carrier: "UA", flight_no: "UA857", dep_airport: "PVG", arr_airport: "ORD", dep_time: "2026-09-26T13:00:00", arr_time: "2026-09-26T15:00:00" }],
+      issues: [],
+      confirmed_ok: [
+        { _kind: "assurance", statement: "直飞航班，无中转风险", evidence: "行程仅一段航班" },
+        { _kind: "preference", preference: "价格低", statement: "这是三个候选里最便宜的一个", verdict: "good" },
+      ],
+      unmet_preferences: [],
+    },
+    {
+      rank: 3, price: "6100", route: ["PVG", "NRT", "ORD"], duration_min: 1320, stop_count: 1,
+      connections: [{ airport: "NRT", gap_min: 295 }], ticket_count: 1, platforms: ["ctrip"],
+      flights: [
+        { carrier: "NH", flight_no: "NH922", dep_airport: "PVG", arr_airport: "NRT", dep_time: "2026-09-26T09:00:00", arr_time: "2026-09-26T12:30:00" },
+        { carrier: "NH", flight_no: "NH110", dep_airport: "NRT", arr_airport: "ORD", dep_time: "2026-09-26T17:25:00", arr_time: "2026-09-26T15:50:00" },
+      ],
+      issues: [{ severity: "major", evidence: "东京中转近 5 小时，明显长于常规转机时间，但不构成风险", needs_user_input: false }],
+      confirmed_ok: [{ _kind: "assurance", statement: "全日空全程承运，行李直挂无需重新托运", evidence: "全日空联程票政策" }],
+      unmet_preferences: [],
+    },
+  ];
+
+  const FAKE_MENU = [
+    { id: "d1", label: "东京中转快 5 小时了，要不要我查查成田机场有什么好逛好吃的？", based_on: "候选三 NRT 中转 295 分钟", priority: "normal" },
+    { id: "d2", label: "护照信息还没告诉我——这会决定香港中转要不要留意入境规则", based_on: "候选一有一条风险因此标了待确认", priority: "high" },
+  ];
+  // 故意不在一开始就摆结论——真实流程里 tips 是"选完之后 agent 去查了才有"
+  // 的东西，演示模式也该一开始只有菜单，点了提交才"查到"结果，不然会让人
+  // 误以为没等选择就已经查完了。
+  const FAKE_TIP_AFTER_SUBMIT = {
+    label: "落地芝加哥怎么去市区",
+    statement: "打车到市区约 45 分钟、55 美元左右；地铁蓝线约 50 分钟、5 美元",
+    evidence: "演示数据，非真实查询结果",
+  };
+
+  $("#results-meta").textContent = "演示模式 — 以下全部是假数据，不消耗真实查询";
+  $("#candidates").innerHTML = "";
+  for (const c of FAKE_CANDIDATES) $("#candidates").appendChild(renderCandidateCard(c));
+  show("#step-results");
+
+  $("#clarify-intro").textContent = "演示模式：要不要我帮你查查这些？勾选想深挖的，或者留空直接跳过。";
+  renderMenu(FAKE_MENU);
+  show("#clarify-menu");
+  show("#clarify-input-row");
+  show("#step-clarify");
+
+  // 覆盖掉真实的提交按钮行为，模拟"选完之后 agent 查到了结果，候选卡片
+  // 用新结论重新渲染"这个真实时序，不打真实 API。
+  $("#clarify-send").onclick = () => {
+    renderTips([FAKE_TIP_AFTER_SUBMIT]);
+    $("#clarify-intro").textContent = "演示模式：完成了，没有更多建议了。";
+    $("#clarify-custom").value = "";
+    hide("#clarify-menu");
+    hide("#clarify-input-row");
+
+    // 模拟 finalize()：拿到答案后重新审查，候选一那条"护照有效期"从
+    // 待确认变成放行——真实流程里这是后端用新 trip_context 重新跑一遍
+    // 风险审查、把整张卡片重新渲染出来的结果，不是前端凭空改一个图章。
+    const resolved = {
+      ...FAKE_CANDIDATES[0],
+      issues: FAKE_CANDIDATES[0].issues.filter((r) => !r.needs_user_input),
+      confirmed_ok: [
+        ...FAKE_CANDIDATES[0].confirmed_ok,
+        { _kind: "assurance", statement: "护照有效期到 2031 年，满足六个月有效期要求", evidence: "你刚才确认的信息" },
+      ],
+    };
+    const oldCard = document.querySelectorAll("#candidates .candidate")[0];
+    oldCard.replaceWith(renderCandidateCard(resolved));
+  };
+  $("#clarify-skip").onclick = () => {
+    $("#clarify-intro").textContent = "演示模式：跳过了，没有查任何东西。";
+    hide("#clarify-menu");
+    hide("#clarify-input-row");
+  };
+
+  $("#step-results").scrollIntoView({ behavior: "smooth" });
 }
